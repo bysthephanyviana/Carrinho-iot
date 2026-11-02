@@ -1,169 +1,207 @@
-// Carrinho IoT - desvio de obstaculos com ESP32
-//
-// Reconstruido a partir do firmware gravado no ESP32 (02/11/2026).
-// Pinos, tempos, limites e mensagens sao os mesmos do original.
-// Detalhes da pinagem e da logica: README.md na raiz do repositorio.
+/*
+  CARRINHO ESP32-WROOM-32 - VERSAO DE COMPATIBILIDADE PARA TESTE
+  Revisao: 18/10/2026 - PWM corrigido para Arduino-ESP32 2.0.17
 
-// ---------- Motores (ponte H) ----------
-const int ENA = 25;  // PWM motor A
-const int IN1 = 26;
-const int IN2 = 27;
-const int ENB = 33;  // PWM motor B
-const int IN3 = 32;
-const int IN4 = 23;
+  Mantem os 12 pinos, PWM 180/255, limites de 55/50 cm e as
+  combinacoes IN1..IN4 do codigo original do Arduino.
 
-const int VELOCIDADE = 180;  // 0..255
-const int PWM_FREQ = 490;    // Hz, igual ao Arduino UNO
-const int PWM_BITS = 8;
+  ALTERACOES EM RELACAO AO ESP32 REVISADO ANTERIOR:
+  1. Leitura ausente volta a valer 100 cm, como no original.
+     O Monitor Serial identifica esses valores como SEM_LEITURA.
+     Isso NAO comprova caminho livre: sensor desligado tambem pode
+     produzir essa indicacao. Teste primeiro com rodas suspensas.
+  2. Intervalo de 60 ms entre sensores para reduzir a possibilidade
+     de um sensor receber o som do outro. O ciclo fica mais lento.
+  3. Monitor Serial mostra as distancias E o movimento comandado.
 
-// ---------- Sensores ultrassonicos ----------
-const int TRIG_FRENTE = 21;
-const int ECHO_FRENTE = 22;
-const int TRIG_DIR = 18;
-const int ECHO_DIR = 19;
-const int TRIG_ESQ = 16;
-const int ECHO_ESQ = 17;
+  Nao e garantia de equivalencia das medicoes nem de funcionamento
+  fisico. Ultrasonic.h foi substituida por pulseIn(), como antes.
+  Se a frente esta livre, obstaculo lateral isolado NAO causa parada:
+  esta e a regra do programa original.
 
-const unsigned long TIMEOUT_ECHO = 20000;  // us
-const int SEM_LEITURA = 100;               // cm assumidos quando nao ha eco
-const int DIST_MAX = 100;                  // cm
+  ANTES DO TESTE:
+  - ECHO esquerdo/direito/frontal com divisor para nivel de 3,3 V.
+  - VCC dos sensores em 5 V regulados; todos os GND em comum.
+  - Retirar jumpers ENA e ENB da L298N (nao confundir com 5V-EN).
+  - Com USB no notebook, desconectar o fio externo do VIN/5V do
+    ESP32. Manter GND comum. Bateria alimenta driver e motores.
+  - Nao alimentar motores pelo ESP32 nem aplicar 8 V em 5V/3V3.
+  - Monitor Serial: 9600 baud.
 
-// ---------- Decisao ----------
-const int LIMITE_FRENTE = 55;  // cm
-const int LIMITE_LADO = 50;    // cm
+  API PWM: Arduino-ESP32 2.0.17, conforme o ambiente de compilacao.
+  analogWriteResolution(bits) e analogWriteFrequency(Hz) recebem
+  apenas UM argumento nesta versao e configuram o PWM globalmente.
+*/
 
-const char *movimento = "PARADO";
+#include <Arduino.h>
 
-// ---------- Movimentos ----------
-void frente() {
-  digitalWrite(IN1, LOW);
-  digitalWrite(IN2, HIGH);
-  digitalWrite(IN3, LOW);
-  digitalWrite(IN4, HIGH);
-  movimento = "FRENTE";
-}
+const uint8_t TRIG_ESQ   = 16; // RX2
+const uint8_t ECHO_ESQ   = 17; // TX2, atraves do divisor
+const uint8_t TRIG_DIR   = 18; // D18
+const uint8_t ECHO_DIR   = 19; // D19, atraves do divisor
+const uint8_t TRIG_FRONT = 21; // D21
+const uint8_t ECHO_FRONT = 22; // D22, atraves do divisor
 
-void esquerda() {
-  digitalWrite(IN1, HIGH);
-  digitalWrite(IN2, LOW);
-  digitalWrite(IN3, LOW);
-  digitalWrite(IN4, HIGH);
-  movimento = "ESQUERDA";
-}
+const uint8_t ENA = 25;
+const uint8_t IN1 = 26;
+const uint8_t IN2 = 27;
+const uint8_t ENB = 33;
+const uint8_t IN3 = 32;
+const uint8_t IN4 = 23;
 
-void direita() {
-  digitalWrite(IN1, LOW);
-  digitalWrite(IN2, HIGH);
-  digitalWrite(IN3, HIGH);
-  digitalWrite(IN4, LOW);
-  movimento = "DIREITA";
-}
+const uint8_t VELOCIDADE = 180;
+const uint32_t PWM_HZ = 490;
+const int LIMITE_OBSTACULO = 50;
+const int LIMITE_CAMINHO_LIVRE = 55;
+const uint32_t TIMEOUT_ECHO_US = 20000UL;
+const uint32_t INTERVALO_SENSORES_MS = 60;
 
-void parar() {
-  digitalWrite(IN1, LOW);
-  digitalWrite(IN2, LOW);
-  digitalWrite(IN3, LOW);
-  digitalWrite(IN4, LOW);
-  movimento = "PARADO";
-}
+// true: reproduz a regra original para ausencia de leitura (100 cm).
+// false: leitura ausente vale -1; frontal ausente para o carrinho,
+//        lateral ausente nao e considerada uma opcao de desvio.
+const bool SEM_LEITURA_COMO_100 = true;
 
-// ---------- Sensores ----------
-// Retorna a distancia em cm (1..100). Sem eco: retorna SEM_LEITURA e marca semLeitura.
-int lerDistancia(int trig, int echo, bool &semLeitura) {
-  digitalWrite(trig, LOW);
+const char *movimentoAtual = "PARADO";
+
+void paraCarro();
+void carroFrente();
+void carroEsquerda();
+void carroDireita();
+int lerDistancia(uint8_t trigPin, uint8_t echoPin, bool &semLeitura);
+void imprimirDistancia(int distancia, bool semLeitura);
+
+int lerDistancia(uint8_t trigPin, uint8_t echoPin, bool &semLeitura) {
+  digitalWrite(trigPin, LOW);
   delayMicroseconds(2);
-  digitalWrite(trig, HIGH);
+  digitalWrite(trigPin, HIGH);
   delayMicroseconds(10);
-  digitalWrite(trig, LOW);
+  digitalWrite(trigPin, LOW);
 
-  unsigned long duracao = pulseIn(echo, HIGH, TIMEOUT_ECHO);
-  unsigned long cm = duracao / 58;
+  const uint32_t duracao = pulseIn(echoPin, HIGH, TIMEOUT_ECHO_US);
+  const int distancia = static_cast<int>(duracao / 58UL);
+  semLeitura = (duracao == 0 || distancia <= 0);
 
-  semLeitura = (duracao == 0 || cm < 1);
-  if (semLeitura) return SEM_LEITURA;
-  return min(cm, (unsigned long)DIST_MAX);
-}
-
-void imprimirDistancia(int cm, bool semLeitura) {
-  Serial.print(cm, DEC);
-  if (semLeitura) Serial.print("(SEM_LEITURA)");
-}
-
-// ---------- PWM ----------
-void configurarPWM() {
-#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
-  analogWriteResolution(ENA, PWM_BITS);
-  analogWriteResolution(ENB, PWM_BITS);
-  analogWriteFrequency(ENA, PWM_FREQ);
-  analogWriteFrequency(ENB, PWM_FREQ);
-#else
-  analogWriteResolution(PWM_BITS);
-  analogWriteFrequency(PWM_FREQ);
-#endif
+  if (semLeitura) {
+    return SEM_LEITURA_COMO_100 ? 100 : -1;
+  }
+  return distancia > 100 ? 100 : distancia;
 }
 
 void setup() {
   Serial.begin(9600);
 
+  // Desabilita os motores antes de configurar seus comandos.
   digitalWrite(ENA, LOW);
   digitalWrite(ENB, LOW);
   pinMode(ENA, OUTPUT);
   pinMode(ENB, OUTPUT);
+
   pinMode(IN1, OUTPUT);
   pinMode(IN2, OUTPUT);
   pinMode(IN3, OUTPUT);
   pinMode(IN4, OUTPUT);
-  parar();
+  paraCarro();
 
   pinMode(TRIG_ESQ, OUTPUT);
   pinMode(ECHO_ESQ, INPUT);
   pinMode(TRIG_DIR, OUTPUT);
   pinMode(ECHO_DIR, INPUT);
-  pinMode(TRIG_FRENTE, OUTPUT);
-  pinMode(ECHO_FRENTE, INPUT);
+  pinMode(TRIG_FRONT, OUTPUT);
+  pinMode(ECHO_FRONT, INPUT);
   digitalWrite(TRIG_ESQ, LOW);
   digitalWrite(TRIG_DIR, LOW);
-  digitalWrite(TRIG_FRENTE, LOW);
+  digitalWrite(TRIG_FRONT, LOW);
 
-  configurarPWM();
+  // Na versao 2.0.17, estas configuracoes nao recebem o pino.
+  // Configurar antes do primeiro analogWrite, para ambos os motores.
+  analogWriteResolution(8);
+  analogWriteFrequency(PWM_HZ);
   analogWrite(ENA, VELOCIDADE);
   analogWrite(ENB, VELOCIDADE);
 
   Serial.println("INICIO - ESP32 compatibilidade - PWM 180/255");
-  Serial.println("ATENCAO: SEM_LEITURA vale 100 cm, como no Arduino.");
-  Serial.println("Sensor desconectado pode parecer caminho livre.");
+  if (SEM_LEITURA_COMO_100) {
+    Serial.println("ATENCAO: SEM_LEITURA vale 100 cm, como no Arduino.");
+    Serial.println("Sensor desconectado pode parecer caminho livre.");
+  } else {
+    Serial.println("Frontal SEM_LEITURA provoca parada.");
+  }
   Serial.println("Teste inicial com rodas suspensas. Serial: 9600.");
   delay(300);
 }
 
 void loop() {
-  bool semFrente = false, semDir = false, semEsq = false;
+  bool semFrente = false;
+  bool semDireita = false;
+  bool semEsquerda = false;
 
-  // Intervalo entre leituras evita que um sensor capte o eco do outro
-  int distFrente = lerDistancia(TRIG_FRENTE, ECHO_FRENTE, semFrente);
-  delay(60);
-  int distDir = lerDistancia(TRIG_DIR, ECHO_DIR, semDir);
-  delay(60);
-  int distEsq = lerDistancia(TRIG_ESQ, ECHO_ESQ, semEsq);
-  delay(60);
+  const int frente = lerDistancia(TRIG_FRONT, ECHO_FRONT, semFrente);
+  delay(INTERVALO_SENSORES_MS);
+  const int direita = lerDistancia(TRIG_DIR, ECHO_DIR, semDireita);
+  delay(INTERVALO_SENSORES_MS);
+  const int esquerda = lerDistancia(TRIG_ESQ, ECHO_ESQ, semEsquerda);
+  delay(INTERVALO_SENSORES_MS);
 
-  if (distFrente > LIMITE_FRENTE) {
-    frente();
-  } else if (distEsq > LIMITE_LADO || distDir > LIMITE_LADO) {
-    if (distEsq < distDir) direita();
-    else esquerda();
+  if (frente < 0) {
+    paraCarro();
+  } else if (frente > LIMITE_CAMINHO_LIVRE) {
+    carroFrente();
+  } else if (esquerda > LIMITE_OBSTACULO || direita > LIMITE_OBSTACULO) {
+    if (esquerda >= direita) {
+      carroEsquerda();
+    } else {
+      carroDireita();
+    }
   } else {
-    parar();
+    paraCarro();
   }
 
   Serial.print("Frente: ");
-  imprimirDistancia(distFrente, semFrente);
+  imprimirDistancia(frente, semFrente);
   Serial.print(" | Dir: ");
-  imprimirDistancia(distDir, semDir);
+  imprimirDistancia(direita, semDireita);
   Serial.print(" | Esq: ");
-  imprimirDistancia(distEsq, semEsq);
+  imprimirDistancia(esquerda, semEsquerda);
   Serial.print(" | Movimento: ");
-  Serial.println(movimento);
-
+  Serial.println(movimentoAtual);
   delay(80);
+}
+
+void imprimirDistancia(int distancia, bool semLeitura) {
+  Serial.print(distancia);
+  if (semLeitura) {
+    Serial.print("(SEM_LEITURA)");
+  }
+}
+
+void carroFrente() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, HIGH);
+  movimentoAtual = "FRENTE";
+}
+
+void carroEsquerda() {
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, HIGH);
+  movimentoAtual = "ESQUERDA";
+}
+
+void carroDireita() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+  movimentoAtual = "DIREITA";
+}
+
+void paraCarro() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+  movimentoAtual = "PARADO";
 }
