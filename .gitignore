@@ -1,0 +1,6 @@
+# Senha do Wi-Fi e chave da nuvem
+secrets.h
+
+# Build
+.pio/
+build/

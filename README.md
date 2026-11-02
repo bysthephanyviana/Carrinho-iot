@@ -97,6 +97,29 @@ Se o carrinho andar para trás em vez de frente, ou girar para o lado errado, os
 
 A constante `SEM_LEITURA_COMO_100` controla o que acontece quando um sensor não responde: `true` (padrão, igual ao Arduino original) trata como 100 cm; `false` faz o carrinho parar quando o sensor da frente não responde.
 
+## Nuvem (ThingSpeak)
+
+O carrinho envia os dados a cada 20 s para o [ThingSpeak](https://thingspeak.mathworks.com), que é gratuito e já mostra os gráficos. O envio roda numa tarefa separada (núcleo 0), então a demora da internet não atrapalha os sensores. Sem Wi-Fi, o carrinho funciona normalmente e tenta reconectar sozinho.
+
+| Campo | Dado |
+|---|---|
+| Field 1 | Distância frente (cm) |
+| Field 2 | Distância direita (cm) |
+| Field 3 | Distância esquerda (cm) |
+| Field 4 | Movimento: 0 = parado, 1 = frente, 2 = esquerda, 3 = direita |
+| Field 5 | Total de desvios desde que ligou |
+
+Cada vez que o carrinho **começa** a virar (esquerda ou direita) conta como 1 desvio. O total volta a 0 quando o ESP32 reinicia.
+
+### Configurar
+
+1. Crie uma conta no ThingSpeak → **Channels → New Channel**, marque Field 1 a 5 com os nomes da tabela acima e salve.
+2. Na aba **API Keys**, copie a **Write API Key**.
+3. Na pasta `carrinho_iot`, copie `secrets.example.h` para `secrets.h` e preencha a rede Wi-Fi (precisa ser **2,4 GHz**; no celular, ative o modo compatível) e a chave.
+4. Envie o código e abra o Monitor Serial (9600): deve aparecer `Nuvem: enviado, registro N`.
+
+> `secrets.h` está no `.gitignore` e **não deve ir para o GitHub**. Cada pessoa cria o seu localmente.
+
 ## Backup do firmware
 
 `firmware-backup/app0_0x10000.bin` é a cópia do programa que estava no ESP32 (partição `app0`, esquema de partições padrão do Arduino). Para regravar num ESP32 que já tenha recebido um sketch Arduino:

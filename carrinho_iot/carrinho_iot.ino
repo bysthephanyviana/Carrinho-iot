@@ -31,9 +31,18 @@
   API PWM: Arduino-ESP32 2.0.17, conforme o ambiente de compilacao.
   analogWriteResolution(bits) e analogWriteFrequency(Hz) recebem
   apenas UM argumento nesta versao e configuram o PWM globalmente.
+
+  NUVEM (02/11/2026):
+  Envia distancias, movimento e total de desvios ao ThingSpeak.
+  O envio roda em uma tarefa separada no nucleo 0, para que a
+  demora da internet nao trave a leitura dos sensores no loop().
+  Rede e chave ficam em secrets.h (copie de secrets.example.h).
 */
 
 #include <Arduino.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include "secrets.h"
 
 const uint8_t TRIG_ESQ   = 16; // RX2
 const uint8_t ECHO_ESQ   = 17; // TX2, atraves do divisor
@@ -63,6 +72,31 @@ const bool SEM_LEITURA_COMO_100 = true;
 
 const char *movimentoAtual = "PARADO";
 
+// Codigo numerico do movimento, para o grafico da nuvem.
+const uint8_t MOV_PARADO = 0;
+const uint8_t MOV_FRENTE = 1;
+const uint8_t MOV_ESQUERDA = 2;
+const uint8_t MOV_DIREITA = 3;
+uint8_t codigoMovimento = MOV_PARADO;
+
+// Um desvio = cada vez que o carrinho COMECA a virar.
+uint32_t totalDesvios = 0;
+bool estavaDesviando = false;
+
+// ThingSpeak gratuito aceita no maximo 1 envio a cada 15 s.
+const uint32_t INTERVALO_NUVEM_MS = 20000;
+
+struct DadosNuvem {
+  int frente;
+  int direita;
+  int esquerda;
+  uint8_t movimento;
+  uint32_t desvios;
+};
+DadosNuvem dadosNuvem = {0, 0, 0, MOV_PARADO, 0};
+portMUX_TYPE muxNuvem = portMUX_INITIALIZER_UNLOCKED;
+
+void tarefaNuvem(void *parametro);
 void paraCarro();
 void carroFrente();
 void carroEsquerda();
@@ -127,7 +161,51 @@ void setup() {
     Serial.println("Frontal SEM_LEITURA provoca parada.");
   }
   Serial.println("Teste inicial com rodas suspensas. Serial: 9600.");
+
+  // Nao espera conectar: o carrinho funciona mesmo sem internet.
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(WIFI_SSID, WIFI_SENHA);
+  xTaskCreatePinnedToCore(tarefaNuvem, "nuvem", 8192, NULL, 1, NULL, 0);
+
   delay(300);
+}
+
+void tarefaNuvem(void *parametro) {
+  for (;;) {
+    if (WiFi.status() != WL_CONNECTED) {
+      vTaskDelay(pdMS_TO_TICKS(1000));
+      continue;
+    }
+
+    portENTER_CRITICAL(&muxNuvem);
+    const DadosNuvem dados = dadosNuvem;
+    portEXIT_CRITICAL(&muxNuvem);
+
+    String url = "http://api.thingspeak.com/update?api_key=";
+    url += THINGSPEAK_API_KEY;
+    url += "&field1=" + String(dados.frente);
+    url += "&field2=" + String(dados.direita);
+    url += "&field3=" + String(dados.esquerda);
+    url += "&field4=" + String(dados.movimento);
+    url += "&field5=" + String(dados.desvios);
+
+    HTTPClient http;
+    http.setTimeout(5000);
+    http.begin(url);
+    const int codigoHttp = http.GET();
+    // ThingSpeak responde o numero do registro; "0" significa recusado.
+    const String resposta = codigoHttp > 0 ? http.getString() : "";
+    http.end();
+
+    if (codigoHttp == 200 && resposta != "0") {
+      Serial.println("Nuvem: enviado, registro " + resposta);
+    } else {
+      Serial.println("Nuvem: falha no envio (HTTP " + String(codigoHttp) + ")");
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(INTERVALO_NUVEM_MS));
+  }
 }
 
 void loop() {
@@ -156,6 +234,16 @@ void loop() {
     paraCarro();
   }
 
+  const bool desviando = codigoMovimento == MOV_ESQUERDA || codigoMovimento == MOV_DIREITA;
+  if (desviando && !estavaDesviando) {
+    totalDesvios++;
+  }
+  estavaDesviando = desviando;
+
+  portENTER_CRITICAL(&muxNuvem);
+  dadosNuvem = {frente, direita, esquerda, codigoMovimento, totalDesvios};
+  portEXIT_CRITICAL(&muxNuvem);
+
   Serial.print("Frente: ");
   imprimirDistancia(frente, semFrente);
   Serial.print(" | Dir: ");
@@ -163,7 +251,9 @@ void loop() {
   Serial.print(" | Esq: ");
   imprimirDistancia(esquerda, semEsquerda);
   Serial.print(" | Movimento: ");
-  Serial.println(movimentoAtual);
+  Serial.print(movimentoAtual);
+  Serial.print(" | Desvios: ");
+  Serial.println(totalDesvios);
   delay(80);
 }
 
@@ -180,6 +270,7 @@ void carroFrente() {
   digitalWrite(IN3, LOW);
   digitalWrite(IN4, HIGH);
   movimentoAtual = "FRENTE";
+  codigoMovimento = MOV_FRENTE;
 }
 
 void carroEsquerda() {
@@ -188,6 +279,7 @@ void carroEsquerda() {
   digitalWrite(IN3, LOW);
   digitalWrite(IN4, HIGH);
   movimentoAtual = "ESQUERDA";
+  codigoMovimento = MOV_ESQUERDA;
 }
 
 void carroDireita() {
@@ -196,6 +288,7 @@ void carroDireita() {
   digitalWrite(IN3, HIGH);
   digitalWrite(IN4, LOW);
   movimentoAtual = "DIREITA";
+  codigoMovimento = MOV_DIREITA;
 }
 
 void paraCarro() {
@@ -204,4 +297,5 @@ void paraCarro() {
   digitalWrite(IN3, LOW);
   digitalWrite(IN4, LOW);
   movimentoAtual = "PARADO";
+  codigoMovimento = MOV_PARADO;
 }
