@@ -4,6 +4,20 @@ Carrinho com 2 motores DC (ponte H tipo L298N) e 3 sensores ultrassônicos (fren
 
 > **Origem desta documentação:** o código-fonte original (`.ino`) não estava disponível. Tudo abaixo foi levantado lendo o firmware gravado no ESP32 (dump da flash + desmontagem do binário) em 02/11/2026. Os números de GPIO e a lógica são exatos; os nomes "ENA/IN1/…" e qual motor é "esquerdo/direito" são **dedução** pela ordem do código — confirme olhando a fiação.
 
+## Componentes
+
+- 1 ESP32
+- 1 ponte H (tipo L298N)
+- 2 rodas com motor DC
+- 3 sensores ultrassônicos (HC-SR04)
+- 2 baterias
+
+### Ponte H: jumpers e alimentação
+
+- **Jumpers ENA e ENB: retirados.** A velocidade é controlada pelo ESP32 (GPIO 25 → ENA, GPIO 33 → ENB). O fio vai no pino de sinal do enable, não no pino de 5 V. Nunca deixe o jumper e o fio do ESP32 ao mesmo tempo, porque isso põe o GPIO em curto com 5 V.
+- **Jumper 5V-EN** (perto do borne de alimentação): fica colocado se a bateria dos motores tiver até 12 V, porque liga o regulador interno.
+- **GND comum:** o GND do ESP32 precisa estar ligado ao GND da ponte H, senão os sinais de direção e PWM não funcionam.
+
 ## Placa
 
 | Item | Valor |
@@ -71,6 +85,10 @@ Se o carrinho andar para trás em vez de frente, ou girar para o lado errado, os
 3. Imprime `Frente: X | Dir: Y | Esq: Z | Movimento: ...` e espera 80 ms
 
 > ⚠️ Como "sem leitura" vale 100 cm, **sensor desconectado = caminho livre**: o carrinho segue em frente e bate. Teste com as rodas suspensas e confira no monitor serial se nenhum sensor mostra `(SEM_LEITURA)`.
+
+## Código
+
+`carrinho_iot/carrinho_iot.ino` foi reescrito a partir do firmware. Usa os mesmos pinos, tempos, limites e mensagens do original. Abra a pasta `carrinho_iot` no Arduino IDE, escolha a placa **ESP32 Dev Module** e envie. Funciona com o core ESP32 2.x (usado no carrinho) e 3.x.
 
 ## Backup do firmware
 
