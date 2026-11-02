@@ -33,16 +33,22 @@
   apenas UM argumento nesta versao e configuram o PWM globalmente.
 
   NUVEM (02/11/2026):
-  Envia distancias, movimento e total de desvios ao ThingSpeak.
-  O envio roda em uma tarefa separada no nucleo 0, para que a
-  demora da internet nao trave a leitura dos sensores no loop().
-  Rede e chave ficam em secrets.h (copie de secrets.example.h).
+  Envia distancias, movimento e total de desvios ao ThingSpeak
+  (historico) e ao Blynk (app ao vivo).
+  Pelo app Blynk o carrinho alterna entre modo AUTOMATICO (regra
+  original de desvio) e MANUAL (botoes frente/tras/esquerda/direita).
+  No modo manual, se a conexao com o Blynk cair, o carrinho para.
+  Internet roda em tarefas separadas no nucleo 0, para que a
+  demora da rede nao trave a leitura dos sensores no loop().
+  Rede e chaves ficam em secrets.h (copie de secrets.example.h).
+  Biblioteca necessaria: "Blynk" (Volodymyr Shymanskyy), 1.3 ou mais nova.
 */
 
 #include <Arduino.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
-#include "secrets.h"
+#include "secrets.h"  // precisa vir antes do Blynk (define o template)
+#include <BlynkSimpleEsp32.h>
 
 const uint8_t TRIG_ESQ   = 16; // RX2
 const uint8_t ECHO_ESQ   = 17; // TX2, atraves do divisor
@@ -77,14 +83,37 @@ const uint8_t MOV_PARADO = 0;
 const uint8_t MOV_FRENTE = 1;
 const uint8_t MOV_ESQUERDA = 2;
 const uint8_t MOV_DIREITA = 3;
+const uint8_t MOV_TRAS = 4;  // so no modo manual
 uint8_t codigoMovimento = MOV_PARADO;
+
+// Alterados pela tarefa do Blynk, lidos pelo loop().
+volatile bool modoManual = false;
+volatile uint8_t comandoManual = MOV_PARADO;
+volatile bool blynkConectado = false;
 
 // Um desvio = cada vez que o carrinho COMECA a virar.
 uint32_t totalDesvios = 0;
 bool estavaDesviando = false;
 
+const char *const NOMES_MOVIMENTO[] = {"PARADO", "FRENTE", "ESQUERDA", "DIREITA", "TRAS"};
+
 // ThingSpeak gratuito aceita no maximo 1 envio a cada 15 s.
-const uint32_t INTERVALO_NUVEM_MS = 20000;
+const uint32_t INTERVALO_THINGSPEAK_MS = 20000;
+// Blynk: app ao vivo. Intervalo curto gasta a cota mensal do plano gratis.
+const uint32_t INTERVALO_BLYNK_MS = 2000;
+
+// Pinos virtuais do Blynk (datastreams do template)
+// V0..V4: carrinho -> app   |   V5..V9: app -> carrinho
+#define VP_FRENTE    V0
+#define VP_DIREITA   V1
+#define VP_ESQUERDA  V2
+#define VP_MOVIMENTO V3
+#define VP_DESVIOS   V4
+#define VP_MODO      V5  // 0 = automatico, 1 = manual
+#define VP_BT_FRENTE V6
+#define VP_BT_TRAS   V7
+#define VP_BT_ESQ    V8
+#define VP_BT_DIR    V9
 
 struct DadosNuvem {
   int frente;
@@ -92,12 +121,15 @@ struct DadosNuvem {
   int esquerda;
   uint8_t movimento;
   uint32_t desvios;
+  bool manual;
 };
-DadosNuvem dadosNuvem = {0, 0, 0, MOV_PARADO, 0};
+DadosNuvem dadosNuvem = {0, 0, 0, MOV_PARADO, 0, false};
 portMUX_TYPE muxNuvem = portMUX_INITIALIZER_UNLOCKED;
 
-void tarefaNuvem(void *parametro);
+void tarefaBlynk(void *parametro);
+void tarefaThingSpeak(void *parametro);
 void paraCarro();
+void carroTras();
 void carroFrente();
 void carroEsquerda();
 void carroDireita();
@@ -166,12 +198,40 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   WiFi.begin(WIFI_SSID, WIFI_SENHA);
-  xTaskCreatePinnedToCore(tarefaNuvem, "nuvem", 8192, NULL, 1, NULL, 0);
+  Blynk.config(BLYNK_AUTH_TOKEN, BLYNK_SERVIDOR, 80);
+  // Tarefas separadas: se o ThingSpeak demorar, o controle manual nao trava.
+  xTaskCreatePinnedToCore(tarefaBlynk, "blynk", 8192, NULL, 2, NULL, 0);
+  xTaskCreatePinnedToCore(tarefaThingSpeak, "thingspeak", 8192, NULL, 1, NULL, 0);
 
   delay(300);
 }
 
-void tarefaNuvem(void *parametro) {
+void enviarThingSpeak(const DadosNuvem &dados) {
+  String url = "http://api.thingspeak.com/update?api_key=";
+  url += THINGSPEAK_API_KEY;
+  url += "&field1=" + String(dados.frente);
+  url += "&field2=" + String(dados.direita);
+  url += "&field3=" + String(dados.esquerda);
+  url += "&field4=" + String(dados.movimento);
+  url += "&field5=" + String(dados.desvios);
+  url += "&field6=" + String(dados.manual ? 1 : 0);
+
+  HTTPClient http;
+  http.setTimeout(5000);
+  http.begin(url);
+  const int codigoHttp = http.GET();
+  // ThingSpeak responde o numero do registro; "0" significa recusado.
+  const String resposta = codigoHttp > 0 ? http.getString() : "";
+  http.end();
+
+  if (codigoHttp == 200 && resposta != "0") {
+    Serial.println("ThingSpeak: enviado, registro " + resposta);
+  } else {
+    Serial.println("ThingSpeak: falha no envio (HTTP " + String(codigoHttp) + ")");
+  }
+}
+
+void tarefaThingSpeak(void *parametro) {
   for (;;) {
     if (WiFi.status() != WL_CONNECTED) {
       vTaskDelay(pdMS_TO_TICKS(1000));
@@ -182,29 +242,79 @@ void tarefaNuvem(void *parametro) {
     const DadosNuvem dados = dadosNuvem;
     portEXIT_CRITICAL(&muxNuvem);
 
-    String url = "http://api.thingspeak.com/update?api_key=";
-    url += THINGSPEAK_API_KEY;
-    url += "&field1=" + String(dados.frente);
-    url += "&field2=" + String(dados.direita);
-    url += "&field3=" + String(dados.esquerda);
-    url += "&field4=" + String(dados.movimento);
-    url += "&field5=" + String(dados.desvios);
+    enviarThingSpeak(dados);
+    vTaskDelay(pdMS_TO_TICKS(INTERVALO_THINGSPEAK_MS));
+  }
+}
 
-    HTTPClient http;
-    http.setTimeout(5000);
-    http.begin(url);
-    const int codigoHttp = http.GET();
-    // ThingSpeak responde o numero do registro; "0" significa recusado.
-    const String resposta = codigoHttp > 0 ? http.getString() : "";
-    http.end();
+// ---------- Blynk: comandos vindos do app ----------
 
-    if (codigoHttp == 200 && resposta != "0") {
-      Serial.println("Nuvem: enviado, registro " + resposta);
-    } else {
-      Serial.println("Nuvem: falha no envio (HTTP " + String(codigoHttp) + ")");
+// Ao (re)conectar, busca no servidor o estado atual do botao de modo.
+BLYNK_CONNECTED() {
+  Blynk.syncVirtual(VP_MODO);
+}
+
+BLYNK_WRITE(VP_MODO) {
+  modoManual = param.asInt() == 1;
+  comandoManual = MOV_PARADO;
+  Serial.println(modoManual ? "Blynk: modo MANUAL" : "Blynk: modo AUTOMATICO");
+}
+
+// Botoes em modo "Push": 1 ao apertar, 0 ao soltar.
+void tratarBotao(uint8_t movimento, int valor) {
+  if (valor == 1) {
+    comandoManual = movimento;
+  } else if (comandoManual == movimento) {
+    comandoManual = MOV_PARADO;
+  }
+}
+
+BLYNK_WRITE(VP_BT_FRENTE) { tratarBotao(MOV_FRENTE, param.asInt()); }
+BLYNK_WRITE(VP_BT_TRAS)   { tratarBotao(MOV_TRAS, param.asInt()); }
+BLYNK_WRITE(VP_BT_ESQ)    { tratarBotao(MOV_ESQUERDA, param.asInt()); }
+BLYNK_WRITE(VP_BT_DIR)    { tratarBotao(MOV_DIREITA, param.asInt()); }
+
+void tarefaBlynk(void *parametro) {
+  uint32_t ultimoEnvio = 0;
+
+  for (;;) {
+    if (WiFi.status() == WL_CONNECTED) {
+      Blynk.run();  // conecta, reconecta e recebe os comandos do app
+    }
+    blynkConectado = Blynk.connected();
+
+    if (blynkConectado && millis() - ultimoEnvio >= INTERVALO_BLYNK_MS) {
+      ultimoEnvio = millis();
+
+      portENTER_CRITICAL(&muxNuvem);
+      const DadosNuvem dados = dadosNuvem;
+      portEXIT_CRITICAL(&muxNuvem);
+
+      Blynk.virtualWrite(VP_FRENTE, dados.frente);
+      Blynk.virtualWrite(VP_DIREITA, dados.direita);
+      Blynk.virtualWrite(VP_ESQUERDA, dados.esquerda);
+      Blynk.virtualWrite(VP_MOVIMENTO, NOMES_MOVIMENTO[dados.movimento]);
+      Blynk.virtualWrite(VP_DESVIOS, dados.desvios);
     }
 
-    vTaskDelay(pdMS_TO_TICKS(INTERVALO_NUVEM_MS));
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+}
+
+// Executa o botao apertado no app. Sem conexao, para por seguranca.
+void executarComandoManual() {
+  const uint8_t comando = blynkConectado ? comandoManual : MOV_PARADO;
+
+  if (comando == MOV_FRENTE) {
+    carroFrente();
+  } else if (comando == MOV_TRAS) {
+    carroTras();
+  } else if (comando == MOV_ESQUERDA) {
+    carroEsquerda();
+  } else if (comando == MOV_DIREITA) {
+    carroDireita();
+  } else {
+    paraCarro();
   }
 }
 
@@ -220,7 +330,11 @@ void loop() {
   const int esquerda = lerDistancia(TRIG_ESQ, ECHO_ESQ, semEsquerda);
   delay(INTERVALO_SENSORES_MS);
 
-  if (frente < 0) {
+  const bool manual = modoManual;
+
+  if (manual) {
+    executarComandoManual();
+  } else if (frente < 0) {
     paraCarro();
   } else if (frente > LIMITE_CAMINHO_LIVRE) {
     carroFrente();
@@ -234,16 +348,19 @@ void loop() {
     paraCarro();
   }
 
-  const bool desviando = codigoMovimento == MOV_ESQUERDA || codigoMovimento == MOV_DIREITA;
+  // So conta desvios feitos sozinho (modo automatico).
+  const bool desviando = !manual &&
+      (codigoMovimento == MOV_ESQUERDA || codigoMovimento == MOV_DIREITA);
   if (desviando && !estavaDesviando) {
     totalDesvios++;
   }
   estavaDesviando = desviando;
 
   portENTER_CRITICAL(&muxNuvem);
-  dadosNuvem = {frente, direita, esquerda, codigoMovimento, totalDesvios};
+  dadosNuvem = {frente, direita, esquerda, codigoMovimento, totalDesvios, manual};
   portEXIT_CRITICAL(&muxNuvem);
 
+  Serial.print(manual ? "[MANUAL] " : "[AUTO] ");
   Serial.print("Frente: ");
   imprimirDistancia(frente, semFrente);
   Serial.print(" | Dir: ");
@@ -289,6 +406,15 @@ void carroDireita() {
   digitalWrite(IN4, LOW);
   movimentoAtual = "DIREITA";
   codigoMovimento = MOV_DIREITA;
+}
+
+void carroTras() {
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+  movimentoAtual = "TRAS";
+  codigoMovimento = MOV_TRAS;
 }
 
 void paraCarro() {

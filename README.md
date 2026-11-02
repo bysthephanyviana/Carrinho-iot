@@ -97,26 +97,60 @@ Se o carrinho andar para trás em vez de frente, ou girar para o lado errado, os
 
 A constante `SEM_LEITURA_COMO_100` controla o que acontece quando um sensor não responde: `true` (padrão, igual ao Arduino original) trata como 100 cm; `false` faz o carrinho parar quando o sensor da frente não responde.
 
-## Nuvem (ThingSpeak)
+## Nuvem e controle pelo app
 
-O carrinho envia os dados a cada 20 s para o [ThingSpeak](https://thingspeak.mathworks.com), que é gratuito e já mostra os gráficos. O envio roda numa tarefa separada (núcleo 0), então a demora da internet não atrapalha os sensores. Sem Wi-Fi, o carrinho funciona normalmente e tenta reconectar sozinho.
+- **Blynk** (app no celular): mostra os dados ao vivo a cada 2 s e permite trocar entre modo **automático** e **manual**.
+- **ThingSpeak**: guarda o histórico em gráficos (1 envio a cada 20 s, limite do plano grátis).
 
-| Campo | Dado |
-|---|---|
-| Field 1 | Distância frente (cm) |
-| Field 2 | Distância direita (cm) |
-| Field 3 | Distância esquerda (cm) |
-| Field 4 | Movimento: 0 = parado, 1 = frente, 2 = esquerda, 3 = direita |
-| Field 5 | Total de desvios desde que ligou |
+A internet roda em tarefas separadas no núcleo 0 do ESP32, então a demora da rede não atrapalha os sensores. Sem Wi-Fi, o carrinho funciona normalmente no modo automático e tenta reconectar sozinho.
 
-Cada vez que o carrinho **começa** a virar (esquerda ou direita) conta como 1 desvio. O total volta a 0 quando o ESP32 reinicia.
+### Modos
 
-### Configurar
+- **Automático** (padrão): a regra original de desvio.
+- **Manual:** botões de segurar no app (Frente, Trás, Esquerda, Direita). O carrinho anda enquanto o botão está apertado e para ao soltar. **Se a conexão com o Blynk cair, o carrinho para.** No manual o carrinho não desvia sozinho de obstáculo.
 
-1. Crie uma conta no ThingSpeak → **Channels → New Channel**, marque Field 1 a 5 com os nomes da tabela acima e salve.
+Cada vez que o carrinho **começa** a virar sozinho (modo automático) conta como 1 desvio. Viradas no manual não contam. O total volta a 0 quando o ESP32 reinicia.
+
+### Configurar o Blynk
+
+1. Na Arduino IDE: **Ferramentas → Gerenciar Bibliotecas**, instale **Blynk** (Volodymyr Shymanskyy).
+2. No [Blynk Console](https://blynk.cloud): **Developer Zone → My Templates → New Template** (hardware ESP32, conexão WiFi).
+3. Em **Datastreams**, crie os pinos virtuais:
+
+   | Pino | Nome | Tipo | Valores |
+   |---|---|---|---|
+   | V0 | Frente | Integer | 0 a 100 (cm) |
+   | V1 | Direita | Integer | 0 a 100 (cm) |
+   | V2 | Esquerda | Integer | 0 a 100 (cm) |
+   | V3 | Movimento | String | — |
+   | V4 | Desvios | Integer | 0 a 100000 |
+   | V5 | Modo | Integer | 0 a 1 (0 = automático, 1 = manual) |
+   | V6 | Botão Frente | Integer | 0 a 1 |
+   | V7 | Botão Trás | Integer | 0 a 1 |
+   | V8 | Botão Esquerda | Integer | 0 a 1 |
+   | V9 | Botão Direita | Integer | 0 a 1 |
+
+4. Monte o painel (web e/ou app): **Gauge** ou **Value Display** para V0–V2, **Label** para V3, **Value Display** para V4, **Switch** para V5 e quatro **Button** em modo **Push** para V6–V9.
+5. Crie um **Device** a partir do template e copie as 3 linhas `BLYNK_TEMPLATE_ID`, `BLYNK_TEMPLATE_NAME` e `BLYNK_AUTH_TOKEN` de **Device Info**.
+
+### Configurar o ThingSpeak
+
+1. **Channels → New Channel**, marque Field 1 a 6 com os nomes abaixo e salve.
+
+   | Campo | Dado |
+   |---|---|
+   | Field 1 | Distância frente (cm) |
+   | Field 2 | Distância direita (cm) |
+   | Field 3 | Distância esquerda (cm) |
+   | Field 4 | Movimento: 0 = parado, 1 = frente, 2 = esquerda, 3 = direita, 4 = trás |
+   | Field 5 | Total de desvios desde que ligou |
+   | Field 6 | Modo: 0 = automático, 1 = manual |
+
 2. Na aba **API Keys**, copie a **Write API Key**.
-3. Na pasta `carrinho_iot`, copie `secrets.example.h` para `secrets.h` e preencha a rede Wi-Fi (precisa ser **2,4 GHz**; no celular, ative o modo compatível) e a chave.
-4. Envie o código e abra o Monitor Serial (9600): deve aparecer `Nuvem: enviado, registro N`.
+
+### Senhas e chaves
+
+Na pasta `carrinho_iot`, copie `secrets.example.h` para `secrets.h` e preencha a rede Wi-Fi (precisa ser **2,4 GHz**; no celular, ative o modo compatível), as chaves do Blynk e do ThingSpeak. Envie o código e abra o Monitor Serial (9600): devem aparecer `ThingSpeak: enviado, registro N` e as mensagens de conexão do Blynk.
 
 > `secrets.h` está no `.gitignore` e **não deve ir para o GitHub**. Cada pessoa cria o seu localmente.
 
