@@ -90,9 +90,14 @@ Se uma roda girar ao contrário, os fios daquele motor estão invertidos na pont
 
 ### Ao ligar
 
-1. Configura pinos e motores, com o carrinho parado.
-2. Começa a conectar no Wi-Fi e no Blynk, em segundo plano.
-3. **Espera parado até 20 s** o Blynk informar o modo (automático ou manual). Sem isso, ele saía no automático mesmo com o app em Manual. Se o Blynk não responder em 20 s, segue no automático.
+1. Configura pinos e motores.
+2. **Começa sempre no modo automático** e já sai andando, como no código original. Funciona mesmo sem internet.
+3. Conecta no Wi-Fi e no Blynk em segundo plano. Na primeira conexão, põe o interruptor do app em **Automático**, para o app mostrar o modo real.
+4. Para ir ao manual, mude o interruptor no app.
+
+Se o Wi-Fi cair e voltar no meio do uso, o carrinho **mantém o modo escolhido no app**. Assim, uma queda de internet no manual não faz ele voltar sozinho para o automático.
+
+> ⚠️ Como ele sai andando assim que liga, ligue a bateria com as **rodas suspensas** ou com o carrinho num lugar com espaço.
 
 ### Leitura dos sensores
 
@@ -239,7 +244,7 @@ O projeto abre direto no VS Code com a extensão PlatformIO. A biblioteca do Bly
 4. Se não encontrar o carrinho, atualize `endereco` no `secrets.ini` com o IP mostrado no Monitor Serial (ou na lista de aparelhos do roteador).
 5. Na primeira vez, permita o Python no firewall do Windows, em rede privada.
 
-Durante a gravação pelo Wi-Fi o carrinho **fica parado** e depois reinicia. **Deixe as rodas suspensas**, porque ele pode começar no automático se o Blynk demorar a responder. Pelo OTA não há Monitor Serial.
+Durante a gravação pelo Wi-Fi o carrinho **fica parado** e depois reinicia **no automático**. **Deixe as rodas suspensas.** Pelo OTA não há Monitor Serial.
 
 ### Arduino IDE
 
@@ -269,8 +274,9 @@ Também funciona: abra a pasta `carrinho_iot`, instale a biblioteca **Blynk** (V
 | 04/11/2026 | Projeto PlatformIO; gravação pelo Wi-Fi (OTA) |
 | 04/11/2026 | Várias redes Wi-Fi, com novas tentativas automáticas |
 | 04/11/2026 | Desvio em pulsos, curvas mais lentas, ré quando muito perto ou encurralado |
-| 04/11/2026 | Manual mais rápido; ao ligar, espera o modo do Blynk |
+| 04/11/2026 | Manual mais rápido |
 | 04/11/2026 | Proteção contra batida: memória do sensor da frente e checagem lateral |
+| 04/11/2026 | Sempre liga no automático e ajusta o interruptor do app; reconexão mantém o modo |
 
 ## Backup do firmware
 
