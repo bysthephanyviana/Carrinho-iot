@@ -69,6 +69,14 @@ const uint8_t VELOCIDADE = 180;
 const uint32_t PWM_HZ = 490;
 const int LIMITE_OBSTACULO = 50;
 const int LIMITE_CAMINHO_LIVRE = 55;
+
+// Ajustes do desvio automatico (04/11/2026):
+// gira em pulsos curtos e mede de novo parado, para nao passar do ponto;
+// curvas mais lentas; da re quando muito perto ou encurralado.
+const uint8_t VELOCIDADE_GIRO = 150;
+const uint32_t TEMPO_GIRO_MS = 250;
+const uint32_t TEMPO_RE_MS = 400;
+const int DIST_MUITO_PERTO = 15;  // cm
 const uint32_t TIMEOUT_ECHO_US = 20000UL;
 const uint32_t INTERVALO_SENSORES_MS = 60;
 
@@ -451,33 +459,31 @@ void loop() {
   delay(INTERVALO_SENSORES_MS);
 
   const bool manual = modoManual;
+  uint8_t acao;
 
   if (manual) {
     executarComandoManual();
-  } else if (frente < 0) {
-    paraCarro();
-  } else if (frente > LIMITE_CAMINHO_LIVRE) {
-    carroFrente();
-  } else if (esquerda > LIMITE_OBSTACULO || direita > LIMITE_OBSTACULO) {
-    if (esquerda >= direita) {
-      carroEsquerda();
-    } else {
-      carroDireita();
-    }
+    acao = codigoMovimento;
   } else {
-    paraCarro();
+    acao = decidirMovimento(frente, direita, esquerda);
+    executarAutomatico(acao, direita, esquerda);
   }
 
-  // So conta desvios feitos sozinho (modo automatico).
+  // So conta desvios feitos sozinho (modo automatico). Os pulsos de giro
+  // de uma mesma manobra contam 1 vez: o desvio termina ao voltar a andar reto.
   const bool desviando = !manual &&
-      (codigoMovimento == MOV_ESQUERDA || codigoMovimento == MOV_DIREITA);
+      (acao == MOV_ESQUERDA || acao == MOV_DIREITA || acao == MOV_TRAS);
   if (desviando && !estavaDesviando) {
     totalDesvios++;
   }
-  estavaDesviando = desviando;
+  if (desviando) {
+    estavaDesviando = true;
+  } else if (acao == MOV_FRENTE || manual) {
+    estavaDesviando = false;
+  }
 
   portENTER_CRITICAL(&muxNuvem);
-  dadosNuvem = {frente, direita, esquerda, codigoMovimento, totalDesvios, manual};
+  dadosNuvem = {frente, direita, esquerda, acao, totalDesvios, manual};
   portEXIT_CRITICAL(&muxNuvem);
 
   Serial.print(manual ? "[MANUAL] " : "[AUTO] ");
@@ -488,10 +494,52 @@ void loop() {
   Serial.print(" | Esq: ");
   imprimirDistancia(esquerda, semEsquerda);
   Serial.print(" | Movimento: ");
-  Serial.print(movimentoAtual);
+  Serial.print(NOMES_MOVIMENTO[acao]);
   Serial.print(" | Desvios: ");
   Serial.println(totalDesvios);
   delay(80);
+}
+
+// Regra original de 55/50 cm, mais re quando muito perto ou encurralado
+// (antes, encurralado, ele so parava e ficava preso).
+uint8_t decidirMovimento(int frente, int direita, int esquerda) {
+  if (frente < 0) {
+    return MOV_PARADO;
+  }
+  if (frente > LIMITE_CAMINHO_LIVRE) {
+    return MOV_FRENTE;
+  }
+  if (frente <= DIST_MUITO_PERTO) {
+    return MOV_TRAS;
+  }
+  if (esquerda > LIMITE_OBSTACULO || direita > LIMITE_OBSTACULO) {
+    return esquerda >= direita ? MOV_ESQUERDA : MOV_DIREITA;
+  }
+  return MOV_TRAS;
+}
+
+void girarPulso(int direita, int esquerda) {
+  if (esquerda >= direita) {
+    carroEsquerda();
+  } else {
+    carroDireita();
+  }
+  delay(TEMPO_GIRO_MS);
+  paraCarro();  // a proxima leitura acontece com o carrinho parado
+}
+
+void executarAutomatico(uint8_t acao, int direita, int esquerda) {
+  if (acao == MOV_FRENTE) {
+    carroFrente();
+  } else if (acao == MOV_ESQUERDA || acao == MOV_DIREITA) {
+    girarPulso(direita, esquerda);
+  } else if (acao == MOV_TRAS) {
+    carroTras();
+    delay(TEMPO_RE_MS);
+    girarPulso(direita, esquerda);
+  } else {
+    paraCarro();
+  }
 }
 
 void imprimirDistancia(int distancia, bool semLeitura) {
@@ -501,7 +549,13 @@ void imprimirDistancia(int distancia, bool semLeitura) {
   }
 }
 
+void definirVelocidade(uint8_t velocidade) {
+  analogWrite(ENA, velocidade);
+  analogWrite(ENB, velocidade);
+}
+
 void carroFrente() {
+  definirVelocidade(VELOCIDADE);
   digitalWrite(IN1, LOW);
   digitalWrite(IN2, HIGH);
   digitalWrite(IN3, LOW);
@@ -511,6 +565,7 @@ void carroFrente() {
 }
 
 void carroEsquerda() {
+  definirVelocidade(VELOCIDADE_GIRO);
   digitalWrite(IN1, HIGH);
   digitalWrite(IN2, LOW);
   digitalWrite(IN3, LOW);
@@ -520,6 +575,7 @@ void carroEsquerda() {
 }
 
 void carroDireita() {
+  definirVelocidade(VELOCIDADE_GIRO);
   digitalWrite(IN1, LOW);
   digitalWrite(IN2, HIGH);
   digitalWrite(IN3, HIGH);
@@ -529,6 +585,7 @@ void carroDireita() {
 }
 
 void carroTras() {
+  definirVelocidade(VELOCIDADE);
   digitalWrite(IN1, HIGH);
   digitalWrite(IN2, LOW);
   digitalWrite(IN3, HIGH);
