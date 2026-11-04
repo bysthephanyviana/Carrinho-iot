@@ -123,6 +123,9 @@ volatile bool modoSincronizado = false;
 
 // Um desvio = cada vez que o carrinho COMECA a virar.
 uint32_t totalDesvios = 0;
+// Lado para onde virou ao comecar cada desvio (esquerda + direita = total).
+uint32_t desviosEsquerda = 0;
+uint32_t desviosDireita = 0;
 bool estavaDesviando = false;
 
 const char *const NOMES_MOVIMENTO[] = {"PARADO", "FRENTE", "ESQUERDA", "DIREITA", "TRAS"};
@@ -144,6 +147,8 @@ const uint32_t INTERVALO_BLYNK_MS = 2000;
 #define VP_BT_TRAS   V7
 #define VP_BT_ESQ    V8
 #define VP_BT_DIR    V9
+#define VP_DESVIOS_ESQ V10
+#define VP_DESVIOS_DIR V11
 
 struct DadosNuvem {
   int frente;
@@ -152,8 +157,10 @@ struct DadosNuvem {
   uint8_t movimento;
   uint32_t desvios;
   bool manual;
+  uint32_t desviosEsquerda;
+  uint32_t desviosDireita;
 };
-DadosNuvem dadosNuvem = {0, 0, 0, MOV_PARADO, 0, false};
+DadosNuvem dadosNuvem = {0, 0, 0, MOV_PARADO, 0, false, 0, 0};
 portMUX_TYPE muxNuvem = portMUX_INITIALIZER_UNLOCKED;
 
 void tarefaBlynk(void *parametro);
@@ -262,6 +269,8 @@ void enviarThingSpeak(const DadosNuvem &dados) {
   url += "&field4=" + String(dados.movimento);
   url += "&field5=" + String(dados.desvios);
   url += "&field6=" + String(dados.manual ? 1 : 0);
+  url += "&field7=" + String(dados.desviosEsquerda);
+  url += "&field8=" + String(dados.desviosDireita);
 
   HTTPClient http;
   http.setTimeout(5000);
@@ -343,6 +352,8 @@ void tarefaBlynk(void *parametro) {
       Blynk.virtualWrite(VP_ESQUERDA, dados.esquerda);
       Blynk.virtualWrite(VP_MOVIMENTO, NOMES_MOVIMENTO[dados.movimento]);
       Blynk.virtualWrite(VP_DESVIOS, dados.desvios);
+      Blynk.virtualWrite(VP_DESVIOS_ESQ, dados.desviosEsquerda);
+      Blynk.virtualWrite(VP_DESVIOS_DIR, dados.desviosDireita);
     }
 
     vTaskDelay(pdMS_TO_TICKS(10));
@@ -515,6 +526,12 @@ void loop() {
       (acao == MOV_ESQUERDA || acao == MOV_DIREITA || acao == MOV_TRAS);
   if (desviando && !estavaDesviando) {
     totalDesvios++;
+    // Mesmo criterio do girarPulso(): vira para o lado com mais espaco.
+    if (esquerda >= direita) {
+      desviosEsquerda++;
+    } else {
+      desviosDireita++;
+    }
   }
   if (desviando) {
     estavaDesviando = true;
@@ -523,7 +540,8 @@ void loop() {
   }
 
   portENTER_CRITICAL(&muxNuvem);
-  dadosNuvem = {frente, direita, esquerda, acao, totalDesvios, manual};
+  dadosNuvem = {frente, direita, esquerda, acao, totalDesvios, manual,
+                desviosEsquerda, desviosDireita};
   portEXIT_CRITICAL(&muxNuvem);
 
   Serial.print(manual ? "[MANUAL] " : "[AUTO] ");
@@ -536,7 +554,12 @@ void loop() {
   Serial.print(" | Movimento: ");
   Serial.print(NOMES_MOVIMENTO[acao]);
   Serial.print(" | Desvios: ");
-  Serial.println(totalDesvios);
+  Serial.print(totalDesvios);
+  Serial.print(" (esq ");
+  Serial.print(desviosEsquerda);
+  Serial.print(", dir ");
+  Serial.print(desviosDireita);
+  Serial.println(")");
   aguardar(80);
 }
 

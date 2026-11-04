@@ -138,7 +138,7 @@ Os valores ficam no começo de `carrinho_iot.ino` e podem ser ajustados:
 
 ### Contagem de desvios
 
-Cada manobra de desvio no automático (giros e/ou ré até voltar a andar reto) conta como **1 desvio**. Viradas no manual não contam. O total volta a 0 quando o ESP32 reinicia.
+Cada manobra de desvio no automático (giros e/ou ré até voltar a andar reto) conta como **1 desvio**. O desvio é contado como **esquerda** ou **direita** conforme o lado para onde o carrinho virou ao começar a manobra, então **total = esquerda + direita**. Viradas no manual não contam. Os contadores voltam a 0 quando o ESP32 reinicia.
 
 ---
 
@@ -162,6 +162,8 @@ Envia os dados a cada 2 s. Pinos virtuais do template **Carrinho IoT**:
 | V7 | Botão Trás | Integer | 0–1 | Button (**Push**) |
 | V8 | Botão Esquerda | Integer | 0–1 | Button (**Push**) |
 | V9 | Botão Direita | Integer | 0–1 | Button (**Push**) |
+| V10 | Desvios Esquerda | Integer | 0–100000 | Label |
+| V11 | Desvios Direita | Integer | 0–100000 | Label |
 
 > ⚠️ Os botões **precisam estar em modo Push**. Em modo Switch, o carrinho continua andando depois de soltar.
 
@@ -173,7 +175,7 @@ Envia os dados a cada 2 s. Pinos virtuais do template **Carrinho IoT**:
 
 **No celular:** instale o app **Blynk IoT** (não o "Blynk Legacy"), entre com a mesma conta, abra o dispositivo, toque na **chave inglesa 🔧** e monte o painel do celular com os mesmos widgets. O painel do celular é separado do da web, mas usa os mesmos pinos.
 
-> O plano grátis tem uma cota de **100 mil mensagens por mês** (aparece no topo do Blynk Console). Com o carrinho ligado, o uso é de cerca de 9 mil por hora.
+> O plano grátis tem uma cota de **100 mil mensagens por mês** (aparece no topo do Blynk Console). Com o carrinho ligado, o uso é de cerca de 13 mil por hora (7 valores a cada 2 s), ou seja, umas 7 horas de uso por mês.
 
 ### ThingSpeak (histórico)
 
@@ -187,8 +189,10 @@ Envia a cada 20 s (limite do plano grátis: 1 envio a cada 15 s).
 | Field 4 | Movimento: 0 = parado, 1 = frente, 2 = esquerda, 3 = direita, 4 = trás |
 | Field 5 | Total de desvios |
 | Field 6 | Modo: 0 = automático, 1 = manual |
+| Field 7 | Desvios para a esquerda |
+| Field 8 | Desvios para a direita |
 
-Para criar: **Channels → New Channel**, marque Field 1 a 6 e copie a **Write API Key** (aba API Keys) para o `secrets.h`. Dica: nos gráficos 1 a 3, use **Y-Axis Min 0 / Max 100**.
+Para criar: **Channels → New Channel**, marque Field 1 a 8 e copie a **Write API Key** (aba API Keys) para o `secrets.h`. Dica: nos gráficos 1 a 3, use **Y-Axis Min 0 / Max 100**.
 
 Para testar a chave sem o ESP32, abra no navegador: `https://api.thingspeak.com/update?api_key=SUA_CHAVE&field1=42`. Se responder um número maior que 0, a chave está certa.
 
@@ -271,6 +275,7 @@ Também funciona: abra a pasta `carrinho_iot`, instale a biblioteca **Blynk** (V
 | 04/11/2026 | Desvio em pulsos, curvas mais lentas, ré quando muito perto ou encurralado |
 | 04/11/2026 | Manual mais rápido; ao ligar, espera o modo do Blynk |
 | 04/11/2026 | Proteção contra batida: memória do sensor da frente e checagem lateral |
+| 04/11/2026 | Contagem de desvios para a esquerda e para a direita (Blynk V10/V11, ThingSpeak Field 7/8) |
 
 ## Backup do firmware
 
