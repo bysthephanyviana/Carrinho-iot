@@ -46,6 +46,7 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiMulti.h>
 #include <HTTPClient.h>
 #include <ArduinoOTA.h>
 #include "secrets.h"  // precisa vir antes do Blynk (define o template)
@@ -134,6 +135,20 @@ portMUX_TYPE muxNuvem = portMUX_INITIALIZER_UNLOCKED;
 void tarefaBlynk(void *parametro);
 void tarefaThingSpeak(void *parametro);
 void tarefaOTA(void *parametro);
+void tarefaWiFi(void *parametro);
+
+// Redes conhecidas: o ESP32 conecta na de sinal mais forte.
+// secrets.h antigo (so WIFI_SSID/WIFI_SENHA) continua funcionando.
+struct RedeWiFi {
+  const char *nome;
+  const char *senha;
+};
+#ifdef WIFI_REDES
+const RedeWiFi REDES_WIFI[] = WIFI_REDES;
+#else
+const RedeWiFi REDES_WIFI[] = {{WIFI_SSID, WIFI_SENHA}};
+#endif
+WiFiMulti wifiMulti;
 void paraCarro();
 void carroTras();
 void carroFrente();
@@ -201,9 +216,12 @@ void setup() {
   Serial.println("Teste inicial com rodas suspensas. Serial: 9600.");
 
   // Nao espera conectar: o carrinho funciona mesmo sem internet.
+  WiFi.setHostname(OTA_NOME);  // nome que aparece no roteador
   WiFi.mode(WIFI_STA);
-  WiFi.setAutoReconnect(true);
-  WiFi.begin(WIFI_SSID, WIFI_SENHA);
+  for (const RedeWiFi &rede : REDES_WIFI) {
+    wifiMulti.addAP(rede.nome, rede.senha);
+  }
+  xTaskCreatePinnedToCore(tarefaWiFi, "wifi", 4096, NULL, 1, NULL, 0);
   Blynk.config(BLYNK_AUTH_TOKEN, BLYNK_SERVIDOR, 80);
   // Tarefas separadas: se o ThingSpeak demorar, o controle manual nao trava.
   xTaskCreatePinnedToCore(tarefaBlynk, "blynk", 8192, NULL, 2, NULL, 0);
@@ -325,6 +343,29 @@ void executarComandoManual() {
   }
 }
 
+// Mantem o Wi-Fi: se cair, procura de novo em todas as redes conhecidas.
+void tarefaWiFi(void *parametro) {
+  bool estavaConectado = false;
+
+  for (;;) {
+    const bool conectado = wifiMulti.run(10000) == WL_CONNECTED;
+
+    if (conectado && !estavaConectado) {
+      Serial.print("Wi-Fi conectado em \"");
+      Serial.print(WiFi.SSID());
+      Serial.print("\". OTA em ");
+      Serial.print(OTA_NOME);
+      Serial.print(".local / IP ");
+      Serial.println(WiFi.localIP());
+    } else if (!conectado && estavaConectado) {
+      Serial.println("Wi-Fi caiu, procurando redes conhecidas...");
+    }
+    estavaConectado = conectado;
+
+    vTaskDelay(pdMS_TO_TICKS(1000));
+  }
+}
+
 void tarefaOTA(void *parametro) {
   // O OTA so pode comecar depois que o Wi-Fi conectar.
   while (WiFi.status() != WL_CONNECTED) {
@@ -346,11 +387,6 @@ void tarefaOTA(void *parametro) {
     Serial.println("OTA: falha (erro " + String(erro) + ")");
   });
   ArduinoOTA.begin();
-
-  Serial.print("Wi-Fi conectado. OTA pronto em ");
-  Serial.print(OTA_NOME);
-  Serial.print(".local / IP ");
-  Serial.println(WiFi.localIP());
 
   for (;;) {
     ArduinoOTA.handle();

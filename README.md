@@ -150,7 +150,9 @@ Cada vez que o carrinho **começa** a virar sozinho (modo automático) conta com
 
 ### Senhas e chaves
 
-Na pasta `carrinho_iot`, copie `secrets.example.h` para `secrets.h` e preencha a rede Wi-Fi (precisa ser **2,4 GHz**; no celular, ative o modo compatível), as chaves do Blynk e do ThingSpeak. Envie o código e abra o Monitor Serial (9600): devem aparecer `ThingSpeak: enviado, registro N` e as mensagens de conexão do Blynk.
+Na pasta `carrinho_iot`, copie `secrets.example.h` para `secrets.h` e preencha as redes Wi-Fi (precisam ser **2,4 GHz**; no celular, ative o modo compatível), as chaves do Blynk e do ThingSpeak.
+
+Em `WIFI_REDES` dá para cadastrar várias redes. O ESP32 conecta sozinho na de sinal mais forte entre as disponíveis e, se a rede cair, procura de novo em todas. Vale incluir o roteamento do celular para ter internet em qualquer lugar. Envie o código e abra o Monitor Serial (9600): devem aparecer `ThingSpeak: enviado, registro N` e as mensagens de conexão do Blynk.
 
 > `secrets.h` está no `.gitignore` e **não deve ir para o GitHub**. Cada pessoa cria o seu localmente.
 
