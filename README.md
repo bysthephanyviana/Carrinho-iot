@@ -1,184 +1,280 @@
 # Carrinho IoT — desvio de obstáculos com ESP32
 
-Carrinho com 2 motores DC (ponte H tipo L298N) e 3 sensores ultrassônicos (frente, direita, esquerda), controlado por um ESP32.
+Carrinho com 2 motores DC (ponte H L298N) e 3 sensores ultrassônicos (frente, direita, esquerda), controlado por um ESP32.
 
-> **Origem desta documentação:** a pinagem e a lógica foram levantadas primeiro pela desmontagem do firmware gravado no ESP32 (02/11/2026). Depois foi encontrado o código-fonte original (`Carrinho_ESP32_Revisado.ino`, revisão 18/10/2026), que confirmou tudo e agora está em `carrinho_iot/`.
+**O que ele faz:**
+- **Modo automático:** anda sozinho e desvia de obstáculos.
+- **Modo manual:** controlado por botões no app **Blynk** (celular ou navegador).
+- Envia distâncias, movimento e número de desvios para o **Blynk** (ao vivo) e o **ThingSpeak** (histórico em gráficos).
+- Conecta sozinho na melhor entre várias redes Wi-Fi cadastradas.
+- Recebe programa novo **pelo Wi-Fi (OTA)**, sem cabo.
+
+> **Origem:** a pinagem e a lógica foram levantadas primeiro pela desmontagem do firmware gravado no ESP32 (02/11/2026). Depois foi encontrado o código-fonte original (`Carrinho_ESP32_Revisado.ino`, revisão 18/10/2026), que confirmou tudo. O código atual em `carrinho_iot/` parte desse original; a versão original sem alterações está no histórico do git (commit `b13407c`).
+
+---
 
 ## Componentes
 
-- 1 ESP32
-- 1 ponte H (tipo L298N)
+- 1 ESP32 DevKit (30 pinos, USB-C)
+- 1 ponte H L298N
 - 2 rodas com motor DC
-- 3 sensores ultrassônicos (HC-SR04)
+- 3 sensores ultrassônicos HC-SR04
 - 2 baterias
 
-### Ponte H: jumpers e alimentação
+## Ligação elétrica
 
-- **Jumpers ENA e ENB: retirados** (não confundir com o 5V-EN). A velocidade é controlada pelo ESP32 (GPIO 25 → ENA, GPIO 33 → ENB). O fio vai no pino de sinal do enable, não no pino de 5 V. Nunca deixe o jumper e o fio do ESP32 ao mesmo tempo, porque isso põe o GPIO em curto com 5 V.
-- **Jumper 5V-EN** (perto do borne de alimentação): fica colocado se a bateria dos motores tiver até 12 V, porque liga o regulador interno.
-- **Bateria** alimenta a ponte H e os motores. Nunca alimentar motores pelo ESP32 nem ligar ~8 V nos pinos 5V/3V3 do ESP32.
-- **Com o USB ligado no notebook**, desconecte o fio externo do VIN/5V do ESP32 (mantenha o GND).
+### Alimentação
+
+Borne azul de 3 parafusos da ponte H:
+
+| Posição | Nome na placa | Liga em |
+|---|---|---|
+| 1 | 12V | **+** da bateria (fio vermelho) |
+| 2 | GND | **−** da bateria e fio **laranja** → pino **GND** do ESP32 |
+| 3 | 5V | fio **amarelo** → pino **VIN** do ESP32 |
+
+> ⚠️ **Nunca** ligue o fio de 5 V no pino **3V3** do ESP32: ele queima. No ESP32 de 30 pinos, o VIN e o 3V3 ficam na mesma altura, colados no USB, um de cada lado. Confira o nome escrito na placa.
+
+> ⚠️ **USB e bateria não podem alimentar o ESP32 ao mesmo tempo.** Para usar o cabo USB, **tire o fio amarelo do VIN** (o GND pode ficar). Para usar só a bateria, desconecte o USB. Para gravar programa novo com a bateria ligada, use o **OTA**.
+
+- Os **sensores só recebem energia pela bateria.** Só com o USB, todos aparecem como `SEM_LEITURA`.
 - **GND comum:** ESP32, ponte H e sensores com todos os GND ligados juntos.
-- **Sensores:** VCC em 5 V regulados; ECHO dos 3 sensores com divisor para 3,3 V.
 
-## Placa
+### Jumpers da ponte H
 
-| Item | Valor |
-|---|---|
-| Chip | ESP32-D0WD-V3 (rev 3.1), 4 MB flash |
-| Core Arduino | esp32 2.0.17 (compilado pelo Arduino Cloud/CLI) |
-| Serial | 9600 baud |
+- **ENA e ENB: retirados.** A velocidade vem do ESP32 (GPIO 25 → ENA, GPIO 33 → ENB). O fio vai no pino de sinal do enable. Nunca deixe o jumper e o fio ao mesmo tempo, porque isso põe o GPIO em curto com 5 V.
+- **5V-EN** (perto do borne azul): **colocado**. Ele liga o regulador que gera os 5 V do ESP32 e dos sensores.
+
+### Sensores
+
+- VCC em 5 V; ECHO dos 3 sensores com divisor para 3,3 V, porque o ESP32 não aceita 5 V nos pinos.
 
 ## Pinagem
 
 ### Motores (ponte H)
 
-| GPIO | Função no código | Pino da ponte H |
+| GPIO | Função | Ponte H |
 |---|---|---|
-| **25** | PWM (`analogWrite` 180/255) | ENA |
-| **26** | direção motor A | IN1 |
-| **27** | direção motor A | IN2 |
-| **33** | PWM (`analogWrite` 180/255) | ENB |
-| **32** | direção motor B | IN3 |
-| **23** | direção motor B | IN4 |
+| **25** | Velocidade (PWM) motor A | ENA |
+| **26** | Direção motor A | IN1 |
+| **27** | Direção motor A | IN2 |
+| **33** | Velocidade (PWM) motor B | ENB |
+| **32** | Direção motor B | IN3 |
+| **23** | Direção motor B | IN4 |
 
-### Sensores ultrassônicos (HC-SR04)
+### Sensores ultrassônicos
 
 | Sensor | TRIG | ECHO |
 |---|---|---|
 | Frente | **GPIO 21** | **GPIO 22** |
 | Direita | **GPIO 18** | **GPIO 19** |
-| Esquerda | **GPIO 16** | **GPIO 17** |
+| Esquerda | **GPIO 16** (RX2) | **GPIO 17** (TX2) |
 
-> ⚠️ O HC-SR04 trabalha em 5 V e o pino ECHO devolve 5 V. O ESP32 aceita só 3,3 V — use divisor resistivo ou módulo 3,3 V no ECHO.
+Lado do D23 no ESP32, de cima para baixo: D23, D22, TX0, RX0, D21, D19, D18, D5, TX2, RX2, D4, D2, D15, GND, 3V3. Não use TX0/RX0, que são da comunicação USB.
 
-## Movimentos
+### Movimentos
 
-| Movimento | 26 | 27 | 32 | 23 |
+| Movimento | 26 | 27 | 32 | 23 | Velocidade |
+|---|---|---|---|---|---|
+| FRENTE | 0 | 1 | 0 | 1 | 180/255 |
+| TRAS | 1 | 0 | 1 | 0 | 180/255 |
+| ESQUERDA (gira no lugar) | 1 | 0 | 0 | 1 | 150/255 |
+| DIREITA (gira no lugar) | 0 | 1 | 1 | 0 | 150/255 |
+| PARADO | 0 | 0 | 0 | 0 | — |
+
+Se uma roda girar ao contrário, os fios daquele motor estão invertidos na ponte H.
+
+---
+
+## Como o carrinho funciona
+
+### Ao ligar
+
+1. Configura pinos e motores, com o carrinho parado.
+2. Começa a conectar no Wi-Fi e no Blynk, em segundo plano.
+3. **Espera parado até 20 s** o Blynk informar o modo (automático ou manual). Sem isso, ele saía no automático mesmo com o app em Manual. Se o Blynk não responder em 20 s, segue no automático.
+
+### Leitura dos sensores
+
+- Pulso de 10 µs no TRIG e `pulseIn(ECHO, HIGH, 20000)` (timeout de 20 ms).
+- Distância = duração / 58 (cm), limitada a 100 cm.
+- Sem eco → vale **100 cm** e aparece `(SEM_LEITURA)` no Monitor Serial.
+- Os 3 sensores são lidos um por vez, com 60 ms entre eles, para um não captar o eco do outro.
+
+### Modo automático
+
+| Situação | O que faz |
+|---|---|
+| Frente livre (**> 55 cm**) e lados longe | Anda **reto** |
+| Frente livre, mas um lado **< 20 cm** | Vira para o lado oposto, para não raspar |
+| Obstáculo na frente e um lado livre (**> 50 cm**) | Gira **0,25 s** para o lado com mais espaço, **para**, mede de novo e repete |
+| Obstáculo a **15 cm ou menos** | **Dá ré** 0,4 s e depois gira |
+| Encurralado (frente e lados bloqueados) | **Dá ré** e gira para o lado com mais espaço |
+
+**Proteção contra batida em parede na diagonal:** quando o carrinho chega numa parede em ângulo, o eco ricocheteia e o sensor da frente fica sem leitura (que valeria 100 cm, "livre"). Enquanto anda reto, uma leitura perdida passa a valer a **última distância válida menos 15 cm** por ciclo, então ele desvia em vez de acelerar para a parede. Essa memória é apagada quando ele gira.
+
+**Limitação:** obstáculos **mais baixos que os sensores** (rodapé, pé de cadeira, degrau) não são detectados.
+
+Os valores ficam no começo de `carrinho_iot.ino` e podem ser ajustados:
+
+| Constante | Valor | O que controla |
+|---|---|---|
+| `LIMITE_CAMINHO_LIVRE` | 55 cm | Distância da frente para considerar livre |
+| `LIMITE_OBSTACULO` | 50 cm | Distância de um lado para considerar livre para girar |
+| `LIMITE_LATERAL_PERTO` | 20 cm | Lado perto demais, vira mesmo com a frente livre |
+| `DIST_MUITO_PERTO` | 15 cm | Abaixo disso, dá ré |
+| `VELOCIDADE` | 180 | Velocidade reto e ré (0–255) |
+| `VELOCIDADE_GIRO` | 150 | Velocidade nas curvas (0–255) |
+| `TEMPO_GIRO_MS` | 250 ms | Duração de cada pulso de giro |
+| `TEMPO_RE_MS` | 400 ms | Duração da ré |
+| `DECAIMENTO_SEM_LEITURA` | 15 cm | Quanto a parede "se aproxima" a cada leitura perdida |
+
+### Modo manual
+
+- Botões de **segurar** no app: Frente, Trás, Esquerda, Direita. O carrinho anda enquanto o botão está apertado e para ao soltar.
+- O botão é aplicado em até 5 ms depois de chegar; a demora que sobra é a da internet.
+- **Se a conexão com o Blynk cair, o carrinho para.**
+- No manual, o carrinho **não desvia sozinho**.
+
+### Contagem de desvios
+
+Cada manobra de desvio no automático (giros e/ou ré até voltar a andar reto) conta como **1 desvio**. Viradas no manual não contam. O total volta a 0 quando o ESP32 reinicia.
+
+---
+
+## Nuvem
+
+A internet roda em tarefas separadas no núcleo 0 do ESP32, então a demora da rede não atrapalha os sensores nem os motores.
+
+### Blynk (ao vivo e controle)
+
+Envia os dados a cada 2 s. Pinos virtuais do template **Carrinho IoT**:
+
+| Pino | Nome | Tipo | Valores | Widget |
 |---|---|---|---|---|
-| FRENTE | 0 | 1 | 0 | 1 |
-| ESQUERDA (gira no lugar) | 1 | 0 | 0 | 1 |
-| DIREITA (gira no lugar) | 0 | 1 | 1 | 0 |
-| PARADO | 0 | 0 | 0 | 0 |
+| V0 | Frente | Integer | 0–100 cm | Gauge |
+| V1 | Direita | Integer | 0–100 cm | Gauge |
+| V2 | Esquerda | Integer | 0–100 cm | Gauge |
+| V3 | Movimento | String | PARADO / FRENTE / ESQUERDA / DIREITA / TRAS | Label |
+| V4 | Desvios | Integer | 0–100000 | Label |
+| V5 | Modo | Integer | 0 = automático, 1 = manual | Switch |
+| V6 | Botão Frente | Integer | 0–1 | Button (**Push**) |
+| V7 | Botão Trás | Integer | 0–1 | Button (**Push**) |
+| V8 | Botão Esquerda | Integer | 0–1 | Button (**Push**) |
+| V9 | Botão Direita | Integer | 0–1 | Button (**Push**) |
 
-Se o carrinho andar para trás em vez de frente, ou girar para o lado errado, os fios de um motor estão invertidos em relação ao que o código espera.
+> ⚠️ Os botões **precisam estar em modo Push**. Em modo Switch, o carrinho continua andando depois de soltar.
 
-## Lógica do programa
+**Configurar do zero:**
+1. [Blynk Console](https://blynk.cloud) → **Zona do desenvolvedor → Meus templates → Novo template** (ESP32, WiFi).
+2. Crie os datastreams da tabela acima.
+3. Monte o **Painel da Web** com os widgets da tabela.
+4. **Dispositivos → Novo dispositivo → Do template**; copie o Template ID e o token de autenticação para o `secrets.h`.
 
-**setup()**
-1. `Serial.begin(9600)`
-2. Pinos dos motores como saída, carrinho parado
-3. TRIG como saída (LOW), ECHO como entrada
-4. PWM 8 bits, ~490 Hz, velocidade 180/255 nos dois motores
-5. Imprime mensagens de início e espera 300 ms
+**No celular:** instale o app **Blynk IoT** (não o "Blynk Legacy"), entre com a mesma conta, abra o dispositivo, toque na **chave inglesa 🔧** e monte o painel do celular com os mesmos widgets. O painel do celular é separado do da web, mas usa os mesmos pinos.
 
-**Leitura de cada sensor**
-- Pulso de 10 µs no TRIG, `pulseIn(ECHO, HIGH, 20000)` (timeout 20 ms)
-- Distância = duração / 58 (cm), limitada a no máximo 100 cm
-- Sem eco (timeout ou < 1 cm) → vale **100 cm** e aparece `(SEM_LEITURA)` no serial
+> O plano grátis tem uma cota de **100 mil mensagens por mês** (aparece no topo do Blynk Console). Com o carrinho ligado, o uso é de cerca de 9 mil por hora.
 
-**loop()** — a cada ~260 ms
-1. Lê frente → espera 60 ms → direita → 60 ms → esquerda → 60 ms
-2. Decide:
-   - frente **> 55 cm** → FRENTE
-   - senão, se esquerda **> 50** ou direita **> 50**:
-     - esquerda < direita → DIREITA
-     - senão → ESQUERDA
-   - senão → PARADO
-3. Imprime `Frente: X | Dir: Y | Esq: Z | Movimento: ...` e espera 80 ms
+### ThingSpeak (histórico)
 
-> ⚠️ Como "sem leitura" vale 100 cm, **sensor desconectado = caminho livre**: o carrinho segue em frente e bate. Teste com as rodas suspensas e confira no monitor serial se nenhum sensor mostra `(SEM_LEITURA)`.
+Envia a cada 20 s (limite do plano grátis: 1 envio a cada 15 s).
 
-## Código
+| Campo | Dado |
+|---|---|
+| Field 1 | Distância frente (cm) |
+| Field 2 | Distância direita (cm) |
+| Field 3 | Distância esquerda (cm) |
+| Field 4 | Movimento: 0 = parado, 1 = frente, 2 = esquerda, 3 = direita, 4 = trás |
+| Field 5 | Total de desvios |
+| Field 6 | Modo: 0 = automático, 1 = manual |
 
-`carrinho_iot/carrinho_iot.ino` é o código original usado no carrinho (revisão 18/10/2026). Abra a pasta `carrinho_iot` no Arduino IDE, escolha a placa **ESP32 Dev Module** e envie.
+Para criar: **Channels → New Channel**, marque Field 1 a 6 e copie a **Write API Key** (aba API Keys) para o `secrets.h`. Dica: nos gráficos 1 a 3, use **Y-Axis Min 0 / Max 100**.
 
-> Use o core **esp32 2.0.x** (o carrinho foi compilado com 2.0.17). No core 3.x, `analogWriteResolution` e `analogWriteFrequency` recebem também o pino e o código não compila sem ajuste.
+Para testar a chave sem o ESP32, abra no navegador: `https://api.thingspeak.com/update?api_key=SUA_CHAVE&field1=42`. Se responder um número maior que 0, a chave está certa.
 
-A constante `SEM_LEITURA_COMO_100` controla o que acontece quando um sensor não responde: `true` (padrão, igual ao Arduino original) trata como 100 cm; `false` faz o carrinho parar quando o sensor da frente não responde.
+---
 
-## Nuvem e controle pelo app
+## Wi-Fi
 
-- **Blynk** (app no celular): mostra os dados ao vivo a cada 2 s e permite trocar entre modo **automático** e **manual**.
-- **ThingSpeak**: guarda o histórico em gráficos (1 envio a cada 20 s, limite do plano grátis).
+- Cadastre todas as redes em `WIFI_REDES` no `secrets.h`. O ESP32 procura as redes por perto, conecta na **conhecida de sinal mais forte** e, se falhar ou cair, tenta de novo.
+- As redes precisam ser **2,4 GHz**. No roteamento do iPhone, ative **"Maximizar compatibilidade"**.
+- Cadastre o **roteamento do celular** para ter internet em qualquer lugar.
+- Com sinal fraco (abaixo de −75 dBm), a conexão pode levar até 1 minuto. Chegue mais perto do roteador e não deixe fios por cima da antena do ESP32 (a ponta com o zigue-zague dourado).
+- No roteador, o carrinho aparece com o nome **carrinho-iot**.
 
-A internet roda em tarefas separadas no núcleo 0 do ESP32, então a demora da rede não atrapalha os sensores. Sem Wi-Fi, o carrinho funciona normalmente no modo automático e tenta reconectar sozinho.
+## Senhas e chaves
 
-### Modos
+Nenhuma senha vai para o GitHub. Cada pessoa cria os seus arquivos localmente:
 
-- **Automático** (padrão): a regra original de desvio.
-- **Manual:** botões de segurar no app (Frente, Trás, Esquerda, Direita). O carrinho anda enquanto o botão está apertado e para ao soltar. **Se a conexão com o Blynk cair, o carrinho para.** No manual o carrinho não desvia sozinho de obstáculo.
+| Arquivo | Copie de | Contém |
+|---|---|---|
+| `carrinho_iot/secrets.h` | `carrinho_iot/secrets.example.h` | Redes Wi-Fi, chave do ThingSpeak, Template ID e token do Blynk, senha do OTA |
+| `secrets.ini` (raiz) | `secrets.example.ini` | Endereço (IP) do carrinho e senha do OTA, para gravar pelo Wi-Fi |
 
-Cada vez que o carrinho **começa** a virar sozinho (modo automático) conta como 1 desvio. Viradas no manual não contam. O total volta a 0 quando o ESP32 reinicia.
+> ⚠️ Preencha o **`secrets.h`**, não o `secrets.example.h`: o modelo vai para o GitHub. A senha do OTA tem que ser igual nos dois arquivos. Passe as senhas para o grupo por mensagem privada.
 
-### Configurar o Blynk
+---
 
-1. Na Arduino IDE: **Ferramentas → Gerenciar Bibliotecas**, instale **Blynk** (Volodymyr Shymanskyy).
-2. No [Blynk Console](https://blynk.cloud): **Developer Zone → My Templates → New Template** (hardware ESP32, conexão WiFi).
-3. Em **Datastreams**, crie os pinos virtuais:
+## Gravar o programa
 
-   | Pino | Nome | Tipo | Valores |
-   |---|---|---|---|
-   | V0 | Frente | Integer | 0 a 100 (cm) |
-   | V1 | Direita | Integer | 0 a 100 (cm) |
-   | V2 | Esquerda | Integer | 0 a 100 (cm) |
-   | V3 | Movimento | String | — |
-   | V4 | Desvios | Integer | 0 a 100000 |
-   | V5 | Modo | Integer | 0 a 1 (0 = automático, 1 = manual) |
-   | V6 | Botão Frente | Integer | 0 a 1 |
-   | V7 | Botão Trás | Integer | 0 a 1 |
-   | V8 | Botão Esquerda | Integer | 0 a 1 |
-   | V9 | Botão Direita | Integer | 0 a 1 |
+### PlatformIO (VS Code) — recomendado
 
-4. Monte o painel (web e/ou app): **Gauge** ou **Value Display** para V0–V2, **Label** para V3, **Value Display** para V4, **Switch** para V5 e quatro **Button** em modo **Push** para V6–V9.
-5. Crie um **Device** a partir do template e copie as 3 linhas `BLYNK_TEMPLATE_ID`, `BLYNK_TEMPLATE_NAME` e `BLYNK_AUTH_TOKEN` de **Device Info**.
-
-### Configurar o ThingSpeak
-
-1. **Channels → New Channel**, marque Field 1 a 6 com os nomes abaixo e salve.
-
-   | Campo | Dado |
-   |---|---|
-   | Field 1 | Distância frente (cm) |
-   | Field 2 | Distância direita (cm) |
-   | Field 3 | Distância esquerda (cm) |
-   | Field 4 | Movimento: 0 = parado, 1 = frente, 2 = esquerda, 3 = direita, 4 = trás |
-   | Field 5 | Total de desvios desde que ligou |
-   | Field 6 | Modo: 0 = automático, 1 = manual |
-
-2. Na aba **API Keys**, copie a **Write API Key**.
-
-### Senhas e chaves
-
-Na pasta `carrinho_iot`, copie `secrets.example.h` para `secrets.h` e preencha as redes Wi-Fi (precisam ser **2,4 GHz**; no celular, ative o modo compatível), as chaves do Blynk e do ThingSpeak.
-
-Em `WIFI_REDES` dá para cadastrar várias redes. O ESP32 conecta sozinho na de sinal mais forte entre as disponíveis e, se a rede cair, procura de novo em todas. Vale incluir o roteamento do celular para ter internet em qualquer lugar. Envie o código e abra o Monitor Serial (9600): devem aparecer `ThingSpeak: enviado, registro N` e as mensagens de conexão do Blynk.
-
-> `secrets.h` está no `.gitignore` e **não deve ir para o GitHub**. Cada pessoa cria o seu localmente.
-
-## Gravar o programa (PlatformIO)
-
-O projeto abre no VS Code com a extensão PlatformIO (`platformio.ini` na raiz). Há dois ambientes:
+O projeto abre direto no VS Code com a extensão PlatformIO. A biblioteca do Blynk e a versão certa do ESP32 são instaladas sozinhas.
 
 | Ambiente | Como grava |
 |---|---|
-| `esp32` (padrão) | Pelo cabo USB |
-| `esp32-ota` | Pelo Wi-Fi (OTA), sem cabo |
+| `env:esp32` (padrão) | Pelo cabo USB |
+| `env:esp32-ota` | Pelo Wi-Fi |
 
-**Primeira vez:** grave pelo cabo, porque o ESP32 precisa ter o código de OTA instalado. Depois disso, o Monitor Serial mostra `OTA pronto em carrinho-iot.local / IP ...`.
+**Pelo cabo:**
+1. Tire o fio amarelo do VIN (ou desligue a bateria).
+2. Conecte o USB e clique na **setinha →** na barra azul do VS Code.
+3. Se travar em `Connecting....`, segure o botão **BOOT** do ESP32.
+4. O ícone da **tomada** abre o Monitor Serial (9600).
 
-**Pelo Wi-Fi:**
-1. Copie `secrets.example.ini` para `secrets.ini` (na raiz) e coloque a mesma senha do `OTA_SENHA` do `secrets.h`.
-2. O computador precisa estar na **mesma rede Wi-Fi** do carrinho.
-3. Na barra do PlatformIO, troque o ambiente para `env:esp32-ota` e clique em Upload.
-4. Se `carrinho-iot.local` não for encontrado, coloque em `endereco` o IP mostrado no Monitor Serial.
-5. Na primeira vez, o Windows pode pedir permissão no firewall para o Python: permita em **rede privada**.
+**Pelo Wi-Fi (OTA):**
+1. O ESP32 precisa já ter este código gravado uma vez pelo cabo.
+2. O computador precisa estar **na mesma rede** que o carrinho.
+3. Na barra azul, troque para `env:esp32-ota` e clique na setinha.
+4. Se não encontrar o carrinho, atualize `endereco` no `secrets.ini` com o IP mostrado no Monitor Serial (ou na lista de aparelhos do roteador).
+5. Na primeira vez, permita o Python no firewall do Windows, em rede privada.
 
-Durante a gravação pelo Wi-Fi o carrinho **fica parado**. Pelo OTA não há Monitor Serial: as mensagens só aparecem com o cabo.
+Durante a gravação pelo Wi-Fi o carrinho **fica parado** e depois reinicia. **Deixe as rodas suspensas**, porque ele pode começar no automático se o Blynk demorar a responder. Pelo OTA não há Monitor Serial.
+
+### Arduino IDE
+
+Também funciona: abra a pasta `carrinho_iot`, instale a biblioteca **Blynk** (Volodymyr Shymanskyy), use o core **esp32 2.0.17** (no 3.x não compila) e a placa **ESP32 Dev Module**.
+
+---
+
+## Problemas comuns
+
+| Problema | O que fazer |
+|---|---|
+| **Offline no Blynk** | Espere até 1 min (sinal fraco). Confira as redes no `secrets.h`. Ligue no USB e veja o Monitor Serial: ele mostra a rede, o sinal (dBm) e o status das tentativas. |
+| **Sensores em `SEM_LEITURA`** | Os sensores só funcionam com a **bateria**. Com ela ligada, confira VCC, GND, TRIG e ECHO de cada sensor. |
+| **Rodas girando com o carrinho parado na mão** | É o modo automático vendo caminho livre. Mude para **Manual** no Blynk ou desligue a bateria. |
+| **Uma roda gira ao contrário** | Fios daquele motor invertidos na ponte H. |
+| **Bate em obstáculo baixo** | O sensor não enxerga abaixo da altura dele. Só resolve mudando a posição dos sensores. |
+| **Manual demora a responder** | É a internet. Chegue mais perto do roteador. |
+| **OTA não encontra o carrinho** | Confira se ele está online e na mesma rede que o computador, e atualize o IP no `secrets.ini`. |
+| **ThingSpeak responde 0** | Chave errada ou envio com menos de 15 s de intervalo. |
+
+## Histórico
+
+| Data | Mudança |
+|---|---|
+| 02/11/2026 | Firmware lido e documentado; código original (18/10/2026) adicionado |
+| 02/11/2026 | Wi-Fi + ThingSpeak; Blynk com modos automático e manual |
+| 04/11/2026 | Projeto PlatformIO; gravação pelo Wi-Fi (OTA) |
+| 04/11/2026 | Várias redes Wi-Fi, com novas tentativas automáticas |
+| 04/11/2026 | Desvio em pulsos, curvas mais lentas, ré quando muito perto ou encurralado |
+| 04/11/2026 | Manual mais rápido; ao ligar, espera o modo do Blynk |
+| 04/11/2026 | Proteção contra batida: memória do sensor da frente e checagem lateral |
 
 ## Backup do firmware
 
-`firmware-backup/app0_0x10000.bin` é a cópia do programa que estava no ESP32 (partição `app0`, esquema de partições padrão do Arduino). Para regravar num ESP32 que já tenha recebido um sketch Arduino:
+`firmware-backup/app0_0x10000.bin` é a cópia do programa que estava no ESP32 antes de qualquer mudança (partição `app0`). Para voltar a ele, num ESP32 que já tenha recebido um sketch Arduino:
 
 ```
 esptool --port COM5 write-flash 0x10000 firmware-backup/app0_0x10000.bin
