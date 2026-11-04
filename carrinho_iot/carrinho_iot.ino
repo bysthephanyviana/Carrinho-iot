@@ -47,6 +47,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <ArduinoOTA.h>
 #include "secrets.h"  // precisa vir antes do Blynk (define o template)
 #include <BlynkSimpleEsp32.h>
 
@@ -91,6 +92,10 @@ volatile bool modoManual = false;
 volatile uint8_t comandoManual = MOV_PARADO;
 volatile bool blynkConectado = false;
 
+// Gravacao pelo Wi-Fi: no PlatformIO, ambiente "esp32-ota".
+const char *const OTA_NOME = "carrinho-iot";  // carrinho-iot.local na rede
+volatile bool atualizandoOTA = false;
+
 // Um desvio = cada vez que o carrinho COMECA a virar.
 uint32_t totalDesvios = 0;
 bool estavaDesviando = false;
@@ -128,6 +133,7 @@ portMUX_TYPE muxNuvem = portMUX_INITIALIZER_UNLOCKED;
 
 void tarefaBlynk(void *parametro);
 void tarefaThingSpeak(void *parametro);
+void tarefaOTA(void *parametro);
 void paraCarro();
 void carroTras();
 void carroFrente();
@@ -202,6 +208,7 @@ void setup() {
   // Tarefas separadas: se o ThingSpeak demorar, o controle manual nao trava.
   xTaskCreatePinnedToCore(tarefaBlynk, "blynk", 8192, NULL, 2, NULL, 0);
   xTaskCreatePinnedToCore(tarefaThingSpeak, "thingspeak", 8192, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(tarefaOTA, "ota", 8192, NULL, 1, NULL, 0);
 
   delay(300);
 }
@@ -318,7 +325,47 @@ void executarComandoManual() {
   }
 }
 
+void tarefaOTA(void *parametro) {
+  // O OTA so pode comecar depois que o Wi-Fi conectar.
+  while (WiFi.status() != WL_CONNECTED) {
+    vTaskDelay(pdMS_TO_TICKS(500));
+  }
+
+  ArduinoOTA.setHostname(OTA_NOME);
+  ArduinoOTA.setPassword(OTA_SENHA);
+  ArduinoOTA.onStart([]() {
+    atualizandoOTA = true;
+    paraCarro();
+    Serial.println("OTA: recebendo programa novo, carrinho parado");
+  });
+  ArduinoOTA.onEnd([]() {
+    Serial.println("OTA: concluido, reiniciando");
+  });
+  ArduinoOTA.onError([](ota_error_t erro) {
+    atualizandoOTA = false;
+    Serial.println("OTA: falha (erro " + String(erro) + ")");
+  });
+  ArduinoOTA.begin();
+
+  Serial.print("Wi-Fi conectado. OTA pronto em ");
+  Serial.print(OTA_NOME);
+  Serial.print(".local / IP ");
+  Serial.println(WiFi.localIP());
+
+  for (;;) {
+    ArduinoOTA.handle();
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+}
+
 void loop() {
+  // Durante a gravacao pelo Wi-Fi o carrinho fica parado.
+  if (atualizandoOTA) {
+    paraCarro();
+    delay(100);
+    return;
+  }
+
   bool semFrente = false;
   bool semDireita = false;
   bool semEsquerda = false;

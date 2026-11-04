@@ -154,6 +154,26 @@ Na pasta `carrinho_iot`, copie `secrets.example.h` para `secrets.h` e preencha a
 
 > `secrets.h` está no `.gitignore` e **não deve ir para o GitHub**. Cada pessoa cria o seu localmente.
 
+## Gravar o programa (PlatformIO)
+
+O projeto abre no VS Code com a extensão PlatformIO (`platformio.ini` na raiz). Há dois ambientes:
+
+| Ambiente | Como grava |
+|---|---|
+| `esp32` (padrão) | Pelo cabo USB |
+| `esp32-ota` | Pelo Wi-Fi (OTA), sem cabo |
+
+**Primeira vez:** grave pelo cabo, porque o ESP32 precisa ter o código de OTA instalado. Depois disso, o Monitor Serial mostra `OTA pronto em carrinho-iot.local / IP ...`.
+
+**Pelo Wi-Fi:**
+1. Copie `secrets.example.ini` para `secrets.ini` (na raiz) e coloque a mesma senha do `OTA_SENHA` do `secrets.h`.
+2. O computador precisa estar na **mesma rede Wi-Fi** do carrinho.
+3. Na barra do PlatformIO, troque o ambiente para `env:esp32-ota` e clique em Upload.
+4. Se `carrinho-iot.local` não for encontrado, coloque em `endereco` o IP mostrado no Monitor Serial.
+5. Na primeira vez, o Windows pode pedir permissão no firewall para o Python: permita em **rede privada**.
+
+Durante a gravação pelo Wi-Fi o carrinho **fica parado**. Pelo OTA não há Monitor Serial: as mensagens só aparecem com o cabo.
+
 ## Backup do firmware
 
 `firmware-backup/app0_0x10000.bin` é a cópia do programa que estava no ESP32 (partição `app0`, esquema de partições padrão do Arduino). Para regravar num ESP32 que já tenha recebido um sketch Arduino:

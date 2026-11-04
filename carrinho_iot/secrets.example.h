@@ -18,3 +18,6 @@
 // Servidor da sua regiao, mostrado em Device Info (ex.: ny3.blynk.cloud).
 // "blynk.cloud" funciona na maioria dos casos.
 #define BLYNK_SERVIDOR "blynk.cloud"
+
+// Senha para gravar pelo Wi-Fi (OTA). Igual a do secrets.ini.
+#define OTA_SENHA "troque-esta-senha"
