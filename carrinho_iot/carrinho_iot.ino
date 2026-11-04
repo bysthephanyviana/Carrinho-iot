@@ -77,6 +77,17 @@ const uint8_t VELOCIDADE_GIRO = 150;
 const uint32_t TEMPO_GIRO_MS = 250;
 const uint32_t TEMPO_RE_MS = 400;
 const int DIST_MUITO_PERTO = 15;  // cm
+
+// Anti-batida (04/11/2026):
+// - Parede em angulo devolve o eco para o lado e o sensor fica SEM_LEITURA
+//   (= 100 cm, "livre"). Enquanto anda reto, uma leitura perdida passa a
+//   valer a ultima distancia valida menos o quanto o carrinho andou.
+// - Sensor lateral muito perto faz virar para o outro lado mesmo com a
+//   frente livre (antes os lados so eram vistos com a frente bloqueada).
+const int DECAIMENTO_SEM_LEITURA = 15;  // cm por ciclo andando reto
+const int LIMITE_LATERAL_PERTO = 20;    // cm
+int ultimaFrenteValida = 100;
+bool memoriaFrente = false;  // vale so enquanto o carrinho segue reto
 const uint32_t TIMEOUT_ECHO_US = 20000UL;
 const uint32_t INTERVALO_SENSORES_MS = 60;
 
@@ -494,7 +505,7 @@ void loop() {
     executarComandoManual();
     acao = codigoMovimento;
   } else {
-    acao = decidirMovimento(frente, direita, esquerda);
+    acao = decidirMovimento(frenteParaDecisao(frente, semFrente), direita, esquerda);
     executarAutomatico(acao, direita, esquerda);
   }
 
@@ -529,6 +540,19 @@ void loop() {
   aguardar(80);
 }
 
+int frenteParaDecisao(int frente, bool semLeitura) {
+  if (!semLeitura) {
+    ultimaFrenteValida = frente;
+    memoriaFrente = true;
+    return frente;
+  }
+  if (!memoriaFrente) {
+    return frente;  // sem historico (acabou de girar): regra original
+  }
+  ultimaFrenteValida = max(0, ultimaFrenteValida - DECAIMENTO_SEM_LEITURA);
+  return ultimaFrenteValida;
+}
+
 // Regra original de 55/50 cm, mais re quando muito perto ou encurralado
 // (antes, encurralado, ele so parava e ficava preso).
 uint8_t decidirMovimento(int frente, int direita, int esquerda) {
@@ -536,6 +560,10 @@ uint8_t decidirMovimento(int frente, int direita, int esquerda) {
     return MOV_PARADO;
   }
   if (frente > LIMITE_CAMINHO_LIVRE) {
+    // Frente livre, mas raspando num lado: vira para o lado com mais espaco.
+    if (direita < LIMITE_LATERAL_PERTO || esquerda < LIMITE_LATERAL_PERTO) {
+      return esquerda >= direita ? MOV_ESQUERDA : MOV_DIREITA;
+    }
     return MOV_FRENTE;
   }
   if (frente <= DIST_MUITO_PERTO) {
@@ -555,6 +583,7 @@ void girarPulso(int direita, int esquerda) {
   }
   aguardar(TEMPO_GIRO_MS);
   paraCarro();  // a proxima leitura acontece com o carrinho parado
+  memoriaFrente = false;  // mudou de direcao: a distancia antiga nao vale
 }
 
 void executarAutomatico(uint8_t acao, int direita, int esquerda) {
