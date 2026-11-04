@@ -46,7 +46,6 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
-#include <WiFiMulti.h>
 #include <HTTPClient.h>
 #include <ArduinoOTA.h>
 #include "secrets.h"  // precisa vir antes do Blynk (define o template)
@@ -148,7 +147,7 @@ const RedeWiFi REDES_WIFI[] = WIFI_REDES;
 #else
 const RedeWiFi REDES_WIFI[] = {{WIFI_SSID, WIFI_SENHA}};
 #endif
-WiFiMulti wifiMulti;
+const uint32_t TIMEOUT_CONEXAO_WIFI_MS = 20000;
 void paraCarro();
 void carroTras();
 void carroFrente();
@@ -218,10 +217,7 @@ void setup() {
   // Nao espera conectar: o carrinho funciona mesmo sem internet.
   WiFi.setHostname(OTA_NOME);  // nome que aparece no roteador
   WiFi.mode(WIFI_STA);
-  for (const RedeWiFi &rede : REDES_WIFI) {
-    wifiMulti.addAP(rede.nome, rede.senha);
-  }
-  xTaskCreatePinnedToCore(tarefaWiFi, "wifi", 4096, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(tarefaWiFi, "wifi", 8192, NULL, 1, NULL, 0);
   Blynk.config(BLYNK_AUTH_TOKEN, BLYNK_SERVIDOR, 80);
   // Tarefas separadas: se o ThingSpeak demorar, o controle manual nao trava.
   xTaskCreatePinnedToCore(tarefaBlynk, "blynk", 8192, NULL, 2, NULL, 0);
@@ -343,12 +339,53 @@ void executarComandoManual() {
   }
 }
 
+// Procura as redes, escolhe a conhecida de sinal mais forte e conecta.
+// (WiFiMulti falhava neste roteador por conectar presa a um BSSID.)
+bool conectarMelhorRede() {
+  const int encontradas = WiFi.scanNetworks();
+  int melhor = -1;
+  int32_t melhorSinal = INT32_MIN;
+
+  for (int i = 0; i < encontradas; i++) {
+    for (size_t r = 0; r < sizeof(REDES_WIFI) / sizeof(REDES_WIFI[0]); r++) {
+      if (WiFi.SSID(i) == REDES_WIFI[r].nome && WiFi.RSSI(i) > melhorSinal) {
+        melhor = r;
+        melhorSinal = WiFi.RSSI(i);
+      }
+    }
+  }
+  WiFi.scanDelete();
+
+  if (melhor < 0) {
+    Serial.println("Wi-Fi: nenhuma rede conhecida por perto");
+    return false;
+  }
+
+  WiFi.begin(REDES_WIFI[melhor].nome, REDES_WIFI[melhor].senha);
+  const uint32_t inicio = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - inicio < TIMEOUT_CONEXAO_WIFI_MS) {
+    vTaskDelay(pdMS_TO_TICKS(250));
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.print("Wi-Fi: falha ao conectar em \"");
+    Serial.print(REDES_WIFI[melhor].nome);
+    Serial.print("\" (sinal ");
+    Serial.print(melhorSinal);
+    Serial.print(" dBm, status ");
+    Serial.print(WiFi.status());
+    Serial.println("), tentando de novo");
+    WiFi.disconnect();
+    return false;
+  }
+  return true;
+}
+
 // Mantem o Wi-Fi: se cair, procura de novo em todas as redes conhecidas.
 void tarefaWiFi(void *parametro) {
   bool estavaConectado = false;
 
   for (;;) {
-    const bool conectado = wifiMulti.run(10000) == WL_CONNECTED;
+    const bool conectado = WiFi.status() == WL_CONNECTED || conectarMelhorRede();
 
     if (conectado && !estavaConectado) {
       Serial.print("Wi-Fi conectado em \"");
