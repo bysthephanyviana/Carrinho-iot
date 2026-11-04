@@ -104,6 +104,12 @@ volatile bool blynkConectado = false;
 const char *const OTA_NOME = "carrinho-iot";  // carrinho-iot.local na rede
 volatile bool atualizandoOTA = false;
 
+// Ao ligar, espera o Blynk informar o modo antes de andar: sem isso,
+// o carrinho comecava no automatico mesmo com o app em Manual.
+// Sem Blynk ate esse tempo, segue no automatico como no original.
+const uint32_t ESPERA_MODO_BLYNK_MS = 20000;
+volatile bool modoSincronizado = false;
+
 // Um desvio = cada vez que o carrinho COMECA a virar.
 uint32_t totalDesvios = 0;
 bool estavaDesviando = false;
@@ -221,6 +227,7 @@ void setup() {
     Serial.println("Frontal SEM_LEITURA provoca parada.");
   }
   Serial.println("Teste inicial com rodas suspensas. Serial: 9600.");
+  Serial.println("Aguardando o modo do Blynk (ate 20 s) antes de andar.");
 
   // Nao espera conectar: o carrinho funciona mesmo sem internet.
   WiFi.setHostname(OTA_NOME);  // nome que aparece no roteador
@@ -285,6 +292,7 @@ BLYNK_CONNECTED() {
 
 BLYNK_WRITE(VP_MODO) {
   modoManual = param.asInt() == 1;
+  modoSincronizado = true;
   comandoManual = MOV_PARADO;
   Serial.println(modoManual ? "Blynk: modo MANUAL" : "Blynk: modo AUTOMATICO");
 }
@@ -333,6 +341,9 @@ void tarefaBlynk(void *parametro) {
 // Executa o botao apertado no app. Sem conexao, para por seguranca.
 void executarComandoManual() {
   const uint8_t comando = blynkConectado ? comandoManual : MOV_PARADO;
+  if (comando == codigoMovimento) {
+    return;  // ja esta fazendo isso
+  }
 
   if (comando == MOV_FRENTE) {
     carroFrente();
@@ -439,9 +450,27 @@ void tarefaOTA(void *parametro) {
   }
 }
 
+// Espera como delay(), mas no modo manual aplica o botao do app na hora,
+// em vez de so na proxima volta do loop (~0,3 s).
+void aguardar(uint32_t ms) {
+  const uint32_t inicio = millis();
+  while (millis() - inicio < ms) {
+    if (modoManual && !atualizandoOTA) {
+      executarComandoManual();
+    }
+    delay(5);
+  }
+}
+
 void loop() {
   // Durante a gravacao pelo Wi-Fi o carrinho fica parado.
   if (atualizandoOTA) {
+    paraCarro();
+    delay(100);
+    return;
+  }
+
+  if (!modoSincronizado && millis() < ESPERA_MODO_BLYNK_MS) {
     paraCarro();
     delay(100);
     return;
@@ -452,11 +481,11 @@ void loop() {
   bool semEsquerda = false;
 
   const int frente = lerDistancia(TRIG_FRONT, ECHO_FRONT, semFrente);
-  delay(INTERVALO_SENSORES_MS);
+  aguardar(INTERVALO_SENSORES_MS);
   const int direita = lerDistancia(TRIG_DIR, ECHO_DIR, semDireita);
-  delay(INTERVALO_SENSORES_MS);
+  aguardar(INTERVALO_SENSORES_MS);
   const int esquerda = lerDistancia(TRIG_ESQ, ECHO_ESQ, semEsquerda);
-  delay(INTERVALO_SENSORES_MS);
+  aguardar(INTERVALO_SENSORES_MS);
 
   const bool manual = modoManual;
   uint8_t acao;
@@ -497,7 +526,7 @@ void loop() {
   Serial.print(NOMES_MOVIMENTO[acao]);
   Serial.print(" | Desvios: ");
   Serial.println(totalDesvios);
-  delay(80);
+  aguardar(80);
 }
 
 // Regra original de 55/50 cm, mais re quando muito perto ou encurralado
@@ -524,7 +553,7 @@ void girarPulso(int direita, int esquerda) {
   } else {
     carroDireita();
   }
-  delay(TEMPO_GIRO_MS);
+  aguardar(TEMPO_GIRO_MS);
   paraCarro();  // a proxima leitura acontece com o carrinho parado
 }
 
@@ -535,7 +564,7 @@ void executarAutomatico(uint8_t acao, int direita, int esquerda) {
     girarPulso(direita, esquerda);
   } else if (acao == MOV_TRAS) {
     carroTras();
-    delay(TEMPO_RE_MS);
+    aguardar(TEMPO_RE_MS);
     girarPulso(direita, esquerda);
   } else {
     paraCarro();
