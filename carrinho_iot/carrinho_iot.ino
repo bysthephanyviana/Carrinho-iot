@@ -115,10 +115,11 @@ volatile bool blynkConectado = false;
 const char *const OTA_NOME = "carrinho-iot";  // carrinho-iot.local na rede
 volatile bool atualizandoOTA = false;
 
-// Ao ligar, sempre comeca no automatico (como o original). Na primeira
-// conexao com o Blynk o interruptor do app e posto em Automatico; nas
-// reconexoes seguintes o modo escolhido no app e mantido.
-bool primeiraConexaoBlynk = true;
+// Ao ligar, espera o Blynk informar o modo antes de andar: sem isso,
+// o carrinho comecava no automatico mesmo com o app em Manual.
+// Sem Blynk ate esse tempo, segue no automatico como no original.
+const uint32_t ESPERA_MODO_BLYNK_MS = 20000;
+volatile bool modoSincronizado = false;
 
 // Um desvio = cada vez que o carrinho COMECA a virar.
 uint32_t totalDesvios = 0;
@@ -237,6 +238,7 @@ void setup() {
     Serial.println("Frontal SEM_LEITURA provoca parada.");
   }
   Serial.println("Teste inicial com rodas suspensas. Serial: 9600.");
+  Serial.println("Aguardando o modo do Blynk (ate 20 s) antes de andar.");
 
   // Nao espera conectar: o carrinho funciona mesmo sem internet.
   WiFi.setHostname(OTA_NOME);  // nome que aparece no roteador
@@ -294,20 +296,14 @@ void tarefaThingSpeak(void *parametro) {
 
 // ---------- Blynk: comandos vindos do app ----------
 
+// Ao (re)conectar, busca no servidor o estado atual do botao de modo.
 BLYNK_CONNECTED() {
-  if (primeiraConexaoBlynk) {
-    // Acabou de ligar: o carrinho esta no automatico, o app tambem fica.
-    primeiraConexaoBlynk = false;
-    Blynk.virtualWrite(VP_MODO, 0);
-    Serial.println("Blynk: conectado, modo AUTOMATICO");
-  } else {
-    // Reconexao (Wi-Fi caiu e voltou): mantem o modo escolhido no app.
-    Blynk.syncVirtual(VP_MODO);
-  }
+  Blynk.syncVirtual(VP_MODO);
 }
 
 BLYNK_WRITE(VP_MODO) {
   modoManual = param.asInt() == 1;
+  modoSincronizado = true;
   comandoManual = MOV_PARADO;
   Serial.println(modoManual ? "Blynk: modo MANUAL" : "Blynk: modo AUTOMATICO");
 }
@@ -480,6 +476,12 @@ void aguardar(uint32_t ms) {
 void loop() {
   // Durante a gravacao pelo Wi-Fi o carrinho fica parado.
   if (atualizandoOTA) {
+    paraCarro();
+    delay(100);
+    return;
+  }
+
+  if (!modoSincronizado && millis() < ESPERA_MODO_BLYNK_MS) {
     paraCarro();
     delay(100);
     return;
