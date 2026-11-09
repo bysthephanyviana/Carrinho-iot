@@ -1,62 +1,17 @@
-/*
-  CARRINHO ESP32-WROOM-32 - VERSAO DE COMPATIBILIDADE PARA TESTE
-  Revisao: 18/10/2026 - PWM corrigido para Arduino-ESP32 2.0.17
-
-  Mantem os 12 pinos, PWM 180/255, limites de 55/50 cm e as
-  combinacoes IN1..IN4 do codigo original do Arduino.
-
-  ALTERACOES EM RELACAO AO ESP32 REVISADO ANTERIOR:
-  1. Leitura ausente volta a valer 100 cm, como no original.
-     O Monitor Serial identifica esses valores como SEM_LEITURA.
-     Isso NAO comprova caminho livre: sensor desligado tambem pode
-     produzir essa indicacao. Teste primeiro com rodas suspensas.
-  2. Intervalo de 60 ms entre sensores para reduzir a possibilidade
-     de um sensor receber o som do outro. O ciclo fica mais lento.
-  3. Monitor Serial mostra as distancias E o movimento comandado.
-
-  Nao e garantia de equivalencia das medicoes nem de funcionamento
-  fisico. Ultrasonic.h foi substituida por pulseIn(), como antes.
-  Se a frente esta livre, obstaculo lateral isolado NAO causa parada:
-  esta e a regra do programa original.
-
-  ANTES DO TESTE:
-  - ECHO esquerdo/direito/frontal com divisor para nivel de 3,3 V.
-  - VCC dos sensores em 5 V regulados; todos os GND em comum.
-  - Retirar jumpers ENA e ENB da L298N (nao confundir com 5V-EN).
-  - Com USB no notebook, desconectar o fio externo do VIN/5V do
-    ESP32. Manter GND comum. Bateria alimenta driver e motores.
-  - Nao alimentar motores pelo ESP32 nem aplicar 8 V em 5V/3V3.
-  - Monitor Serial: 9600 baud.
-
-  API PWM: Arduino-ESP32 2.0.17, conforme o ambiente de compilacao.
-  analogWriteResolution(bits) e analogWriteFrequency(Hz) recebem
-  apenas UM argumento nesta versao e configuram o PWM globalmente.
-
-  NUVEM (02/11/2026):
-  Envia distancias, movimento e total de desvios ao ThingSpeak
-  (historico) e ao Blynk (app ao vivo).
-  Pelo app Blynk o carrinho alterna entre modo AUTOMATICO (regra
-  original de desvio) e MANUAL (botoes frente/tras/esquerda/direita).
-  No modo manual, se a conexao com o Blynk cair, o carrinho para.
-  Internet roda em tarefas separadas no nucleo 0, para que a
-  demora da rede nao trave a leitura dos sensores no loop().
-  Rede e chaves ficam em secrets.h (copie de secrets.example.h).
-  Biblioteca necessaria: "Blynk" (Volodymyr Shymanskyy), 1.3 ou mais nova.
-*/
-
 #include <Arduino.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <ArduinoOTA.h>
-#include "secrets.h"  // precisa vir antes do Blynk (define o template)
+#include <Preferences.h>
+#include "secrets.h"
 #include <BlynkSimpleEsp32.h>
 
-const uint8_t TRIG_ESQ   = 16; // RX2
-const uint8_t ECHO_ESQ   = 17; // TX2, atraves do divisor
-const uint8_t TRIG_DIR   = 18; // D18
-const uint8_t ECHO_DIR   = 19; // D19, atraves do divisor
-const uint8_t TRIG_FRONT = 21; // D21
-const uint8_t ECHO_FRONT = 22; // D22, atraves do divisor
+const uint8_t TRIG_ESQ = 16;
+const uint8_t ECHO_ESQ = 17;
+const uint8_t TRIG_DIR = 18;
+const uint8_t ECHO_DIR = 19;
+const uint8_t TRIG_FRENTE = 21;
+const uint8_t ECHO_FRENTE = 22;
 
 const uint8_t ENA = 25;
 const uint8_t IN1 = 26;
@@ -66,89 +21,55 @@ const uint8_t IN3 = 32;
 const uint8_t IN4 = 23;
 
 const uint8_t VELOCIDADE = 180;
-const uint32_t PWM_HZ = 490;
-const int LIMITE_OBSTACULO = 50;
-const int LIMITE_CAMINHO_LIVRE = 55;
-
-// Ajustes do desvio automatico (04/11/2026):
-// gira em pulsos curtos e mede de novo parado, para nao passar do ponto;
-// curvas mais lentas; da re quando muito perto ou encurralado.
 const uint8_t VELOCIDADE_GIRO = 150;
+
+const int LIMITE_CAMINHO_LIVRE = 55;
+const int LIMITE_OBSTACULO = 50;
+const int LIMITE_LATERAL_PERTO = 20;
+const int DIST_MUITO_PERTO = 15;
+const int DECAIMENTO_SEM_LEITURA = 15;
+const int DIST_MAXIMA = 100;
+
 const uint32_t TEMPO_GIRO_MS = 250;
 const uint32_t TEMPO_RE_MS = 400;
-const int DIST_MUITO_PERTO = 15;  // cm
-
-// Anti-batida (04/11/2026):
-// - Parede em angulo devolve o eco para o lado e o sensor fica SEM_LEITURA
-//   (= 100 cm, "livre"). Enquanto anda reto, uma leitura perdida passa a
-//   valer a ultima distancia valida menos o quanto o carrinho andou.
-// - Sensor lateral muito perto faz virar para o outro lado mesmo com a
-//   frente livre (antes os lados so eram vistos com a frente bloqueada).
-const int DECAIMENTO_SEM_LEITURA = 15;  // cm por ciclo andando reto
-const int LIMITE_LATERAL_PERTO = 20;    // cm
-int ultimaFrenteValida = 100;
-bool memoriaFrente = false;  // vale so enquanto o carrinho segue reto
-const uint32_t TIMEOUT_ECHO_US = 20000UL;
+const uint32_t TIMEOUT_ECHO_US = 20000;
 const uint32_t INTERVALO_SENSORES_MS = 60;
+const uint32_t ESPERA_MODO_BLYNK_MS = 20000;
+const uint32_t TIMEOUT_CONEXAO_WIFI_MS = 20000;
+const uint32_t INTERVALO_THINGSPEAK_MS = 20000;
+const uint32_t INTERVALO_BLYNK_MS = 2000;
 
-// true: reproduz a regra original para ausencia de leitura (100 cm).
-// false: leitura ausente vale -1; frontal ausente para o carrinho,
-//        lateral ausente nao e considerada uma opcao de desvio.
-const bool SEM_LEITURA_COMO_100 = true;
-
-const char *movimentoAtual = "PARADO";
-
-// Codigo numerico do movimento, para o grafico da nuvem.
 const uint8_t MOV_PARADO = 0;
 const uint8_t MOV_FRENTE = 1;
 const uint8_t MOV_ESQUERDA = 2;
 const uint8_t MOV_DIREITA = 3;
-const uint8_t MOV_TRAS = 4;  // so no modo manual
-uint8_t codigoMovimento = MOV_PARADO;
-
-// Alterados pela tarefa do Blynk, lidos pelo loop().
-volatile bool modoManual = false;
-volatile uint8_t comandoManual = MOV_PARADO;
-volatile bool blynkConectado = false;
-
-// Gravacao pelo Wi-Fi: no PlatformIO, ambiente "esp32-ota".
-const char *const OTA_NOME = "carrinho-iot";  // carrinho-iot.local na rede
-volatile bool atualizandoOTA = false;
-
-// Ao ligar, espera o Blynk informar o modo antes de andar: sem isso,
-// o carrinho comecava no automatico mesmo com o app em Manual.
-// Sem Blynk ate esse tempo, segue no automatico como no original.
-const uint32_t ESPERA_MODO_BLYNK_MS = 20000;
-volatile bool modoSincronizado = false;
-
-// Um desvio = cada vez que o carrinho COMECA a virar.
-uint32_t totalDesvios = 0;
-// Lado para onde virou ao comecar cada desvio (esquerda + direita = total).
-uint32_t desviosEsquerda = 0;
-uint32_t desviosDireita = 0;
-bool estavaDesviando = false;
-
+const uint8_t MOV_TRAS = 4;
 const char *const NOMES_MOVIMENTO[] = {"PARADO", "FRENTE", "ESQUERDA", "DIREITA", "TRAS"};
 
-// ThingSpeak gratuito aceita no maximo 1 envio a cada 15 s.
-const uint32_t INTERVALO_THINGSPEAK_MS = 20000;
-// Blynk: app ao vivo. Intervalo curto gasta a cota mensal do plano gratis.
-const uint32_t INTERVALO_BLYNK_MS = 2000;
-
-// Pinos virtuais do Blynk (datastreams do template)
-// V0..V4: carrinho -> app   |   V5..V9: app -> carrinho
-#define VP_FRENTE    V0
-#define VP_DIREITA   V1
-#define VP_ESQUERDA  V2
-#define VP_MOVIMENTO V3
-#define VP_DESVIOS   V4
-#define VP_MODO      V5  // 0 = automatico, 1 = manual
-#define VP_BT_FRENTE V6
-#define VP_BT_TRAS   V7
-#define VP_BT_ESQ    V8
-#define VP_BT_DIR    V9
+#define VP_FRENTE      V0
+#define VP_DIREITA     V1
+#define VP_ESQUERDA    V2
+#define VP_MOVIMENTO   V3
+#define VP_DESVIOS     V4
+#define VP_MODO        V5
+#define VP_BT_FRENTE   V6
+#define VP_BT_TRAS     V7
+#define VP_BT_ESQ      V8
+#define VP_BT_DIR      V9
 #define VP_DESVIOS_ESQ V10
 #define VP_DESVIOS_DIR V11
+
+const char *const OTA_NOME = "carrinho-iot";
+
+struct RedeWiFi {
+  const char *nome;
+  const char *senha;
+};
+#ifdef WIFI_REDES
+const RedeWiFi REDES_WIFI[] = WIFI_REDES;
+#else
+const RedeWiFi REDES_WIFI[] = {{WIFI_SSID, WIFI_SENHA}};
+#endif
 
 struct DadosNuvem {
   int frente;
@@ -160,104 +81,83 @@ struct DadosNuvem {
   uint32_t desviosEsquerda;
   uint32_t desviosDireita;
 };
+
+uint8_t codigoMovimento = MOV_PARADO;
+volatile bool modoManual = false;
+volatile bool modoSincronizado = false;
+volatile uint8_t comandoManual = MOV_PARADO;
+volatile bool blynkConectado = false;
+volatile bool atualizandoOTA = false;
+
+int ultimaFrenteValida = DIST_MAXIMA;
+bool memoriaFrente = false;
+
+uint32_t totalDesvios = 0;
+uint32_t desviosEsquerda = 0;
+uint32_t desviosDireita = 0;
+bool estavaDesviando = false;
+
+Preferences preferencias;
 DadosNuvem dadosNuvem = {0, 0, 0, MOV_PARADO, 0, false, 0, 0};
 portMUX_TYPE muxNuvem = portMUX_INITIALIZER_UNLOCKED;
 
-void tarefaBlynk(void *parametro);
-void tarefaThingSpeak(void *parametro);
-void tarefaOTA(void *parametro);
-void tarefaWiFi(void *parametro);
-
-// Redes conhecidas: o ESP32 conecta na de sinal mais forte.
-// secrets.h antigo (so WIFI_SSID/WIFI_SENHA) continua funcionando.
-struct RedeWiFi {
-  const char *nome;
-  const char *senha;
-};
-#ifdef WIFI_REDES
-const RedeWiFi REDES_WIFI[] = WIFI_REDES;
-#else
-const RedeWiFi REDES_WIFI[] = {{WIFI_SSID, WIFI_SENHA}};
-#endif
-const uint32_t TIMEOUT_CONEXAO_WIFI_MS = 20000;
-void paraCarro();
-void carroTras();
-void carroFrente();
-void carroEsquerda();
-void carroDireita();
-int lerDistancia(uint8_t trigPin, uint8_t echoPin, bool &semLeitura);
-void imprimirDistancia(int distancia, bool semLeitura);
-
-int lerDistancia(uint8_t trigPin, uint8_t echoPin, bool &semLeitura) {
-  digitalWrite(trigPin, LOW);
-  delayMicroseconds(2);
-  digitalWrite(trigPin, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(trigPin, LOW);
-
-  const uint32_t duracao = pulseIn(echoPin, HIGH, TIMEOUT_ECHO_US);
-  const int distancia = static_cast<int>(duracao / 58UL);
-  semLeitura = (duracao == 0 || distancia <= 0);
-
-  if (semLeitura) {
-    return SEM_LEITURA_COMO_100 ? 100 : -1;
-  }
-  return distancia > 100 ? 100 : distancia;
+void definirMotores(uint8_t velocidade, bool in1, bool in2, bool in3, bool in4, uint8_t movimento) {
+  analogWrite(ENA, velocidade);
+  analogWrite(ENB, velocidade);
+  digitalWrite(IN1, in1);
+  digitalWrite(IN2, in2);
+  digitalWrite(IN3, in3);
+  digitalWrite(IN4, in4);
+  codigoMovimento = movimento;
 }
 
-void setup() {
-  Serial.begin(9600);
+void carroFrente()   { definirMotores(VELOCIDADE, LOW, HIGH, LOW, HIGH, MOV_FRENTE); }
+void carroTras()     { definirMotores(VELOCIDADE, HIGH, LOW, HIGH, LOW, MOV_TRAS); }
+void carroEsquerda() { definirMotores(VELOCIDADE_GIRO, HIGH, LOW, LOW, HIGH, MOV_ESQUERDA); }
+void carroDireita()  { definirMotores(VELOCIDADE_GIRO, LOW, HIGH, HIGH, LOW, MOV_DIREITA); }
 
-  // Desabilita os motores antes de configurar seus comandos.
-  digitalWrite(ENA, LOW);
-  digitalWrite(ENB, LOW);
-  pinMode(ENA, OUTPUT);
-  pinMode(ENB, OUTPUT);
+void paraCarro() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+  codigoMovimento = MOV_PARADO;
+}
 
-  pinMode(IN1, OUTPUT);
-  pinMode(IN2, OUTPUT);
-  pinMode(IN3, OUTPUT);
-  pinMode(IN4, OUTPUT);
-  paraCarro();
+int lerDistancia(uint8_t trig, uint8_t echo, bool &semLeitura) {
+  digitalWrite(trig, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trig, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trig, LOW);
 
-  pinMode(TRIG_ESQ, OUTPUT);
-  pinMode(ECHO_ESQ, INPUT);
-  pinMode(TRIG_DIR, OUTPUT);
-  pinMode(ECHO_DIR, INPUT);
-  pinMode(TRIG_FRONT, OUTPUT);
-  pinMode(ECHO_FRONT, INPUT);
-  digitalWrite(TRIG_ESQ, LOW);
-  digitalWrite(TRIG_DIR, LOW);
-  digitalWrite(TRIG_FRONT, LOW);
-
-  // Na versao 2.0.17, estas configuracoes nao recebem o pino.
-  // Configurar antes do primeiro analogWrite, para ambos os motores.
-  analogWriteResolution(8);
-  analogWriteFrequency(PWM_HZ);
-  analogWrite(ENA, VELOCIDADE);
-  analogWrite(ENB, VELOCIDADE);
-
-  Serial.println("INICIO - ESP32 compatibilidade - PWM 180/255");
-  if (SEM_LEITURA_COMO_100) {
-    Serial.println("ATENCAO: SEM_LEITURA vale 100 cm, como no Arduino.");
-    Serial.println("Sensor desconectado pode parecer caminho livre.");
-  } else {
-    Serial.println("Frontal SEM_LEITURA provoca parada.");
+  const uint32_t duracao = pulseIn(echo, HIGH, TIMEOUT_ECHO_US);
+  const int distancia = duracao / 58;
+  semLeitura = duracao == 0 || distancia <= 0;
+  if (semLeitura) {
+    return DIST_MAXIMA;
   }
-  Serial.println("Teste inicial com rodas suspensas. Serial: 9600.");
-  Serial.println("Aguardando o modo do Blynk (ate 20 s) antes de andar.");
+  return min(distancia, DIST_MAXIMA);
+}
 
-  // Nao espera conectar: o carrinho funciona mesmo sem internet.
-  WiFi.setHostname(OTA_NOME);  // nome que aparece no roteador
-  WiFi.mode(WIFI_STA);
-  xTaskCreatePinnedToCore(tarefaWiFi, "wifi", 8192, NULL, 1, NULL, 0);
-  Blynk.config(BLYNK_AUTH_TOKEN, BLYNK_SERVIDOR, 80);
-  // Tarefas separadas: se o ThingSpeak demorar, o controle manual nao trava.
-  xTaskCreatePinnedToCore(tarefaBlynk, "blynk", 8192, NULL, 2, NULL, 0);
-  xTaskCreatePinnedToCore(tarefaThingSpeak, "thingspeak", 8192, NULL, 1, NULL, 0);
-  xTaskCreatePinnedToCore(tarefaOTA, "ota", 8192, NULL, 1, NULL, 0);
+void carregarDesvios() {
+  preferencias.begin("carrinho", false);
+  totalDesvios = preferencias.getULong("total", 0);
+  desviosEsquerda = preferencias.getULong("esq", 0);
+  desviosDireita = preferencias.getULong("dir", 0);
+}
 
-  delay(300);
+void salvarDesvios() {
+  preferencias.putULong("total", totalDesvios);
+  preferencias.putULong("esq", desviosEsquerda);
+  preferencias.putULong("dir", desviosDireita);
+}
+
+DadosNuvem lerDadosNuvem() {
+  portENTER_CRITICAL(&muxNuvem);
+  const DadosNuvem dados = dadosNuvem;
+  portEXIT_CRITICAL(&muxNuvem);
+  return dados;
 }
 
 void enviarThingSpeak(const DadosNuvem &dados) {
@@ -276,7 +176,6 @@ void enviarThingSpeak(const DadosNuvem &dados) {
   http.setTimeout(5000);
   http.begin(url);
   const int codigoHttp = http.GET();
-  // ThingSpeak responde o numero do registro; "0" significa recusado.
   const String resposta = codigoHttp > 0 ? http.getString() : "";
   http.end();
 
@@ -287,25 +186,17 @@ void enviarThingSpeak(const DadosNuvem &dados) {
   }
 }
 
-void tarefaThingSpeak(void *parametro) {
+void tarefaThingSpeak(void *) {
   for (;;) {
     if (WiFi.status() != WL_CONNECTED) {
       vTaskDelay(pdMS_TO_TICKS(1000));
       continue;
     }
-
-    portENTER_CRITICAL(&muxNuvem);
-    const DadosNuvem dados = dadosNuvem;
-    portEXIT_CRITICAL(&muxNuvem);
-
-    enviarThingSpeak(dados);
+    enviarThingSpeak(lerDadosNuvem());
     vTaskDelay(pdMS_TO_TICKS(INTERVALO_THINGSPEAK_MS));
   }
 }
 
-// ---------- Blynk: comandos vindos do app ----------
-
-// Ao (re)conectar, busca no servidor o estado atual do botao de modo.
 BLYNK_CONNECTED() {
   Blynk.syncVirtual(VP_MODO);
 }
@@ -317,7 +208,6 @@ BLYNK_WRITE(VP_MODO) {
   Serial.println(modoManual ? "Blynk: modo MANUAL" : "Blynk: modo AUTOMATICO");
 }
 
-// Botoes em modo "Push": 1 ao apertar, 0 ao soltar.
 void tratarBotao(uint8_t movimento, int valor) {
   if (valor == 1) {
     comandoManual = movimento;
@@ -331,22 +221,18 @@ BLYNK_WRITE(VP_BT_TRAS)   { tratarBotao(MOV_TRAS, param.asInt()); }
 BLYNK_WRITE(VP_BT_ESQ)    { tratarBotao(MOV_ESQUERDA, param.asInt()); }
 BLYNK_WRITE(VP_BT_DIR)    { tratarBotao(MOV_DIREITA, param.asInt()); }
 
-void tarefaBlynk(void *parametro) {
+void tarefaBlynk(void *) {
   uint32_t ultimoEnvio = 0;
 
   for (;;) {
     if (WiFi.status() == WL_CONNECTED) {
-      Blynk.run();  // conecta, reconecta e recebe os comandos do app
+      Blynk.run();
     }
     blynkConectado = Blynk.connected();
 
     if (blynkConectado && millis() - ultimoEnvio >= INTERVALO_BLYNK_MS) {
       ultimoEnvio = millis();
-
-      portENTER_CRITICAL(&muxNuvem);
-      const DadosNuvem dados = dadosNuvem;
-      portEXIT_CRITICAL(&muxNuvem);
-
+      const DadosNuvem dados = lerDadosNuvem();
       Blynk.virtualWrite(VP_FRENTE, dados.frente);
       Blynk.virtualWrite(VP_DIREITA, dados.direita);
       Blynk.virtualWrite(VP_ESQUERDA, dados.esquerda);
@@ -360,28 +246,6 @@ void tarefaBlynk(void *parametro) {
   }
 }
 
-// Executa o botao apertado no app. Sem conexao, para por seguranca.
-void executarComandoManual() {
-  const uint8_t comando = blynkConectado ? comandoManual : MOV_PARADO;
-  if (comando == codigoMovimento) {
-    return;  // ja esta fazendo isso
-  }
-
-  if (comando == MOV_FRENTE) {
-    carroFrente();
-  } else if (comando == MOV_TRAS) {
-    carroTras();
-  } else if (comando == MOV_ESQUERDA) {
-    carroEsquerda();
-  } else if (comando == MOV_DIREITA) {
-    carroDireita();
-  } else {
-    paraCarro();
-  }
-}
-
-// Procura as redes, escolhe a conhecida de sinal mais forte e conecta.
-// (WiFiMulti falhava neste roteador por conectar presa a um BSSID.)
 bool conectarMelhorRede() {
   const int encontradas = WiFi.scanNetworks();
   int melhor = -1;
@@ -407,45 +271,33 @@ bool conectarMelhorRede() {
   while (WiFi.status() != WL_CONNECTED && millis() - inicio < TIMEOUT_CONEXAO_WIFI_MS) {
     vTaskDelay(pdMS_TO_TICKS(250));
   }
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.print("Wi-Fi: falha ao conectar em \"");
-    Serial.print(REDES_WIFI[melhor].nome);
-    Serial.print("\" (sinal ");
-    Serial.print(melhorSinal);
-    Serial.print(" dBm, status ");
-    Serial.print(WiFi.status());
-    Serial.println("), tentando de novo");
-    WiFi.disconnect();
-    return false;
+  if (WiFi.status() == WL_CONNECTED) {
+    return true;
   }
-  return true;
+
+  Serial.printf("Wi-Fi: falha ao conectar em \"%s\" (sinal %d dBm, status %d), tentando de novo\n",
+                REDES_WIFI[melhor].nome, melhorSinal, WiFi.status());
+  WiFi.disconnect();
+  return false;
 }
 
-// Mantem o Wi-Fi: se cair, procura de novo em todas as redes conhecidas.
-void tarefaWiFi(void *parametro) {
+void tarefaWiFi(void *) {
   bool estavaConectado = false;
 
   for (;;) {
     const bool conectado = WiFi.status() == WL_CONNECTED || conectarMelhorRede();
-
     if (conectado && !estavaConectado) {
-      Serial.print("Wi-Fi conectado em \"");
-      Serial.print(WiFi.SSID());
-      Serial.print("\". OTA em ");
-      Serial.print(OTA_NOME);
-      Serial.print(".local / IP ");
-      Serial.println(WiFi.localIP());
+      Serial.printf("Wi-Fi conectado em \"%s\". OTA em %s.local / IP %s\n",
+                    WiFi.SSID().c_str(), OTA_NOME, WiFi.localIP().toString().c_str());
     } else if (!conectado && estavaConectado) {
       Serial.println("Wi-Fi caiu, procurando redes conhecidas...");
     }
     estavaConectado = conectado;
-
     vTaskDelay(pdMS_TO_TICKS(1000));
   }
 }
 
-void tarefaOTA(void *parametro) {
-  // O OTA so pode comecar depois que o Wi-Fi conectar.
+void tarefaOTA(void *) {
   while (WiFi.status() != WL_CONNECTED) {
     vTaskDelay(pdMS_TO_TICKS(500));
   }
@@ -457,9 +309,7 @@ void tarefaOTA(void *parametro) {
     paraCarro();
     Serial.println("OTA: recebendo programa novo, carrinho parado");
   });
-  ArduinoOTA.onEnd([]() {
-    Serial.println("OTA: concluido, reiniciando");
-  });
+  ArduinoOTA.onEnd([]() { Serial.println("OTA: concluido, reiniciando"); });
   ArduinoOTA.onError([](ota_error_t erro) {
     atualizandoOTA = false;
     Serial.println("OTA: falha (erro " + String(erro) + ")");
@@ -472,8 +322,21 @@ void tarefaOTA(void *parametro) {
   }
 }
 
-// Espera como delay(), mas no modo manual aplica o botao do app na hora,
-// em vez de so na proxima volta do loop (~0,3 s).
+void executarComandoManual() {
+  const uint8_t comando = blynkConectado ? comandoManual : MOV_PARADO;
+  if (comando == codigoMovimento) {
+    return;
+  }
+
+  switch (comando) {
+    case MOV_FRENTE:   carroFrente(); break;
+    case MOV_TRAS:     carroTras(); break;
+    case MOV_ESQUERDA: carroEsquerda(); break;
+    case MOV_DIREITA:  carroDireita(); break;
+    default:           paraCarro(); break;
+  }
+}
+
 void aguardar(uint32_t ms) {
   const uint32_t inicio = millis();
   while (millis() - inicio < ms) {
@@ -484,85 +347,6 @@ void aguardar(uint32_t ms) {
   }
 }
 
-void loop() {
-  // Durante a gravacao pelo Wi-Fi o carrinho fica parado.
-  if (atualizandoOTA) {
-    paraCarro();
-    delay(100);
-    return;
-  }
-
-  if (!modoSincronizado && millis() < ESPERA_MODO_BLYNK_MS) {
-    paraCarro();
-    delay(100);
-    return;
-  }
-
-  bool semFrente = false;
-  bool semDireita = false;
-  bool semEsquerda = false;
-
-  const int frente = lerDistancia(TRIG_FRONT, ECHO_FRONT, semFrente);
-  aguardar(INTERVALO_SENSORES_MS);
-  const int direita = lerDistancia(TRIG_DIR, ECHO_DIR, semDireita);
-  aguardar(INTERVALO_SENSORES_MS);
-  const int esquerda = lerDistancia(TRIG_ESQ, ECHO_ESQ, semEsquerda);
-  aguardar(INTERVALO_SENSORES_MS);
-
-  const bool manual = modoManual;
-  uint8_t acao;
-
-  if (manual) {
-    executarComandoManual();
-    acao = codigoMovimento;
-  } else {
-    acao = decidirMovimento(frenteParaDecisao(frente, semFrente), direita, esquerda);
-    executarAutomatico(acao, direita, esquerda);
-  }
-
-  // So conta desvios feitos sozinho (modo automatico). Os pulsos de giro
-  // de uma mesma manobra contam 1 vez: o desvio termina ao voltar a andar reto.
-  const bool desviando = !manual &&
-      (acao == MOV_ESQUERDA || acao == MOV_DIREITA || acao == MOV_TRAS);
-  if (desviando && !estavaDesviando) {
-    totalDesvios++;
-    // Mesmo criterio do girarPulso(): vira para o lado com mais espaco.
-    if (esquerda >= direita) {
-      desviosEsquerda++;
-    } else {
-      desviosDireita++;
-    }
-  }
-  if (desviando) {
-    estavaDesviando = true;
-  } else if (acao == MOV_FRENTE || manual) {
-    estavaDesviando = false;
-  }
-
-  portENTER_CRITICAL(&muxNuvem);
-  dadosNuvem = {frente, direita, esquerda, acao, totalDesvios, manual,
-                desviosEsquerda, desviosDireita};
-  portEXIT_CRITICAL(&muxNuvem);
-
-  Serial.print(manual ? "[MANUAL] " : "[AUTO] ");
-  Serial.print("Frente: ");
-  imprimirDistancia(frente, semFrente);
-  Serial.print(" | Dir: ");
-  imprimirDistancia(direita, semDireita);
-  Serial.print(" | Esq: ");
-  imprimirDistancia(esquerda, semEsquerda);
-  Serial.print(" | Movimento: ");
-  Serial.print(NOMES_MOVIMENTO[acao]);
-  Serial.print(" | Desvios: ");
-  Serial.print(totalDesvios);
-  Serial.print(" (esq ");
-  Serial.print(desviosEsquerda);
-  Serial.print(", dir ");
-  Serial.print(desviosDireita);
-  Serial.println(")");
-  aguardar(80);
-}
-
 int frenteParaDecisao(int frente, bool semLeitura) {
   if (!semLeitura) {
     ultimaFrenteValida = frente;
@@ -570,22 +354,20 @@ int frenteParaDecisao(int frente, bool semLeitura) {
     return frente;
   }
   if (!memoriaFrente) {
-    return frente;  // sem historico (acabou de girar): regra original
+    return frente;
   }
   ultimaFrenteValida = max(0, ultimaFrenteValida - DECAIMENTO_SEM_LEITURA);
   return ultimaFrenteValida;
 }
 
-// Regra original de 55/50 cm, mais re quando muito perto ou encurralado
-// (antes, encurralado, ele so parava e ficava preso).
+uint8_t ladoComMaisEspaco(int direita, int esquerda) {
+  return esquerda >= direita ? MOV_ESQUERDA : MOV_DIREITA;
+}
+
 uint8_t decidirMovimento(int frente, int direita, int esquerda) {
-  if (frente < 0) {
-    return MOV_PARADO;
-  }
   if (frente > LIMITE_CAMINHO_LIVRE) {
-    // Frente livre, mas raspando num lado: vira para o lado com mais espaco.
     if (direita < LIMITE_LATERAL_PERTO || esquerda < LIMITE_LATERAL_PERTO) {
-      return esquerda >= direita ? MOV_ESQUERDA : MOV_DIREITA;
+      return ladoComMaisEspaco(direita, esquerda);
     }
     return MOV_FRENTE;
   }
@@ -593,33 +375,51 @@ uint8_t decidirMovimento(int frente, int direita, int esquerda) {
     return MOV_TRAS;
   }
   if (esquerda > LIMITE_OBSTACULO || direita > LIMITE_OBSTACULO) {
-    return esquerda >= direita ? MOV_ESQUERDA : MOV_DIREITA;
+    return ladoComMaisEspaco(direita, esquerda);
   }
   return MOV_TRAS;
 }
 
 void girarPulso(int direita, int esquerda) {
-  if (esquerda >= direita) {
+  if (ladoComMaisEspaco(direita, esquerda) == MOV_ESQUERDA) {
     carroEsquerda();
   } else {
     carroDireita();
   }
   aguardar(TEMPO_GIRO_MS);
-  paraCarro();  // a proxima leitura acontece com o carrinho parado
-  memoriaFrente = false;  // mudou de direcao: a distancia antiga nao vale
+  paraCarro();
+  memoriaFrente = false;
 }
 
 void executarAutomatico(uint8_t acao, int direita, int esquerda) {
   if (acao == MOV_FRENTE) {
     carroFrente();
-  } else if (acao == MOV_ESQUERDA || acao == MOV_DIREITA) {
-    girarPulso(direita, esquerda);
   } else if (acao == MOV_TRAS) {
     carroTras();
     aguardar(TEMPO_RE_MS);
     girarPulso(direita, esquerda);
   } else {
-    paraCarro();
+    girarPulso(direita, esquerda);
+  }
+}
+
+void contarDesvio(bool manual, uint8_t acao, int direita, int esquerda) {
+  const bool desviando = !manual && acao != MOV_FRENTE && acao != MOV_PARADO;
+
+  if (desviando && !estavaDesviando) {
+    totalDesvios++;
+    if (ladoComMaisEspaco(direita, esquerda) == MOV_ESQUERDA) {
+      desviosEsquerda++;
+    } else {
+      desviosDireita++;
+    }
+    salvarDesvios();
+  }
+
+  if (desviando) {
+    estavaDesviando = true;
+  } else if (acao == MOV_FRENTE || manual) {
+    estavaDesviando = false;
   }
 }
 
@@ -630,56 +430,90 @@ void imprimirDistancia(int distancia, bool semLeitura) {
   }
 }
 
-void definirVelocidade(uint8_t velocidade) {
-  analogWrite(ENA, velocidade);
-  analogWrite(ENB, velocidade);
+void imprimirEstado(bool manual, uint8_t acao, int frente, bool semFrente,
+                    int direita, bool semDireita, int esquerda, bool semEsquerda) {
+  Serial.print(manual ? "[MANUAL] Frente: " : "[AUTO] Frente: ");
+  imprimirDistancia(frente, semFrente);
+  Serial.print(" | Dir: ");
+  imprimirDistancia(direita, semDireita);
+  Serial.print(" | Esq: ");
+  imprimirDistancia(esquerda, semEsquerda);
+  Serial.printf(" | Movimento: %s | Desvios: %u (esq %u, dir %u)\n",
+                NOMES_MOVIMENTO[acao], totalDesvios, desviosEsquerda, desviosDireita);
 }
 
-void carroFrente() {
-  definirVelocidade(VELOCIDADE);
-  digitalWrite(IN1, LOW);
-  digitalWrite(IN2, HIGH);
-  digitalWrite(IN3, LOW);
-  digitalWrite(IN4, HIGH);
-  movimentoAtual = "FRENTE";
-  codigoMovimento = MOV_FRENTE;
+void setup() {
+  Serial.begin(9600);
+  carregarDesvios();
+
+  digitalWrite(ENA, LOW);
+  digitalWrite(ENB, LOW);
+  pinMode(ENA, OUTPUT);
+  pinMode(ENB, OUTPUT);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+  paraCarro();
+
+  pinMode(TRIG_ESQ, OUTPUT);
+  pinMode(ECHO_ESQ, INPUT);
+  pinMode(TRIG_DIR, OUTPUT);
+  pinMode(ECHO_DIR, INPUT);
+  pinMode(TRIG_FRENTE, OUTPUT);
+  pinMode(ECHO_FRENTE, INPUT);
+  digitalWrite(TRIG_ESQ, LOW);
+  digitalWrite(TRIG_DIR, LOW);
+  digitalWrite(TRIG_FRENTE, LOW);
+
+  analogWrite(ENA, VELOCIDADE);
+  analogWrite(ENB, VELOCIDADE);
+
+  Serial.println("Carrinho IoT iniciado. Aguardando o modo do Blynk (ate 20 s).");
+  Serial.printf("Desvios salvos: %u (esq %u, dir %u)\n", totalDesvios, desviosEsquerda, desviosDireita);
+
+  WiFi.setHostname(OTA_NOME);
+  WiFi.mode(WIFI_STA);
+  Blynk.config(BLYNK_AUTH_TOKEN, BLYNK_SERVIDOR, 80);
+  xTaskCreatePinnedToCore(tarefaWiFi, "wifi", 8192, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(tarefaBlynk, "blynk", 8192, NULL, 2, NULL, 0);
+  xTaskCreatePinnedToCore(tarefaThingSpeak, "thingspeak", 8192, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(tarefaOTA, "ota", 8192, NULL, 1, NULL, 0);
+
+  delay(300);
 }
 
-void carroEsquerda() {
-  definirVelocidade(VELOCIDADE_GIRO);
-  digitalWrite(IN1, HIGH);
-  digitalWrite(IN2, LOW);
-  digitalWrite(IN3, LOW);
-  digitalWrite(IN4, HIGH);
-  movimentoAtual = "ESQUERDA";
-  codigoMovimento = MOV_ESQUERDA;
-}
+void loop() {
+  if (atualizandoOTA || (!modoSincronizado && millis() < ESPERA_MODO_BLYNK_MS)) {
+    paraCarro();
+    delay(100);
+    return;
+  }
 
-void carroDireita() {
-  definirVelocidade(VELOCIDADE_GIRO);
-  digitalWrite(IN1, LOW);
-  digitalWrite(IN2, HIGH);
-  digitalWrite(IN3, HIGH);
-  digitalWrite(IN4, LOW);
-  movimentoAtual = "DIREITA";
-  codigoMovimento = MOV_DIREITA;
-}
+  bool semFrente, semDireita, semEsquerda;
+  const int frente = lerDistancia(TRIG_FRENTE, ECHO_FRENTE, semFrente);
+  aguardar(INTERVALO_SENSORES_MS);
+  const int direita = lerDistancia(TRIG_DIR, ECHO_DIR, semDireita);
+  aguardar(INTERVALO_SENSORES_MS);
+  const int esquerda = lerDistancia(TRIG_ESQ, ECHO_ESQ, semEsquerda);
+  aguardar(INTERVALO_SENSORES_MS);
 
-void carroTras() {
-  definirVelocidade(VELOCIDADE);
-  digitalWrite(IN1, HIGH);
-  digitalWrite(IN2, LOW);
-  digitalWrite(IN3, HIGH);
-  digitalWrite(IN4, LOW);
-  movimentoAtual = "TRAS";
-  codigoMovimento = MOV_TRAS;
-}
+  const bool manual = modoManual;
+  uint8_t acao;
+  if (manual) {
+    executarComandoManual();
+    acao = codigoMovimento;
+  } else {
+    acao = decidirMovimento(frenteParaDecisao(frente, semFrente), direita, esquerda);
+    executarAutomatico(acao, direita, esquerda);
+  }
 
-void paraCarro() {
-  digitalWrite(IN1, LOW);
-  digitalWrite(IN2, LOW);
-  digitalWrite(IN3, LOW);
-  digitalWrite(IN4, LOW);
-  movimentoAtual = "PARADO";
-  codigoMovimento = MOV_PARADO;
+  contarDesvio(manual, acao, direita, esquerda);
+
+  portENTER_CRITICAL(&muxNuvem);
+  dadosNuvem = {frente, direita, esquerda, acao, totalDesvios, manual, desviosEsquerda, desviosDireita};
+  portEXIT_CRITICAL(&muxNuvem);
+
+  imprimirEstado(manual, acao, frente, semFrente, direita, semDireita, esquerda, semEsquerda);
+  aguardar(80);
 }

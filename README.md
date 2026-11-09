@@ -9,7 +9,7 @@ Carrinho com 2 motores DC (ponte H L298N) e 3 sensores ultrassônicos (frente, d
 - Conecta sozinho na melhor entre várias redes Wi-Fi cadastradas.
 - Recebe programa novo **pelo Wi-Fi (OTA)**, sem cabo.
 
-> **Origem:** a pinagem e a lógica foram levantadas primeiro pela desmontagem do firmware gravado no ESP32 (02/11/2026). Depois foi encontrado o código-fonte original (`Carrinho_ESP32_Revisado.ino`, revisão 18/10/2026), que confirmou tudo. O código atual em `carrinho_iot/` parte desse original; a versão original sem alterações está no histórico do git (commit `b13407c`).
+> **Origem:** a pinagem e a lógica foram levantadas primeiro pela desmontagem do firmware gravado no ESP32 (02/11/2026). Depois foi encontrado o código-fonte original (`Carrinho_ESP32_Revisado.ino`, revisão 18/10/2026), que confirmou tudo. O código atual em `carrinho_iot/` parte desse original; a versão original sem alterações está no histórico do git (commit `b13407c`). O código não tem comentários: as explicações de cada parte estão neste README.
 
 ---
 
@@ -138,7 +138,11 @@ Os valores ficam no começo de `carrinho_iot.ino` e podem ser ajustados:
 
 ### Contagem de desvios
 
-Cada manobra de desvio no automático (giros e/ou ré até voltar a andar reto) conta como **1 desvio**. O desvio é contado como **esquerda** ou **direita** conforme o lado para onde o carrinho virou ao começar a manobra, então **total = esquerda + direita**. Viradas no manual não contam. Os contadores voltam a 0 quando o ESP32 reinicia.
+Cada manobra de desvio no automático (giros e/ou ré até voltar a andar reto) conta como **1 desvio**. O desvio é contado como **esquerda** ou **direita** conforme o lado para onde o carrinho virou ao começar a manobra, então **total = esquerda + direita**. Viradas no manual não contam.
+
+Os contadores ficam **salvos na memória flash** do ESP32 (biblioteca `Preferences`, área `carrinho`) e **continuam de onde pararam** quando o carrinho é desligado e ligado de novo. Ao ligar, o Monitor Serial mostra `Desvios salvos: N (esq X, dir Y)`. A flash só é gravada quando um desvio novo acontece, para poupar a vida útil da memória.
+
+> Para zerar os contadores, hoje é preciso apagar a flash inteira (PlatformIO: **Project Tasks → esp32 → Platform → Erase Flash**) e gravar o programa de novo pelo cabo. Isso também apaga o programa, então só faça com o cabo USB à mão.
 
 ---
 
@@ -247,7 +251,9 @@ Durante a gravação pelo Wi-Fi o carrinho **fica parado** e depois reinicia. **
 
 ### Arduino IDE
 
-Também funciona: abra a pasta `carrinho_iot`, instale a biblioteca **Blynk** (Volodymyr Shymanskyy), use o core **esp32 2.0.17** (no 3.x não compila) e a placa **ESP32 Dev Module**.
+Também funciona: abra a pasta `carrinho_iot`, instale a biblioteca **Blynk** (Volodymyr Shymanskyy), use o core **esp32 2.0.17** (o mesmo do carrinho) e a placa **ESP32 Dev Module**.
+
+O PWM dos motores usa a configuração padrão do `analogWrite` (8 bits); as linhas que fixavam a frequência em 490 Hz foram retiradas.
 
 ---
 
@@ -276,6 +282,7 @@ Também funciona: abra a pasta `carrinho_iot`, instale a biblioteca **Blynk** (V
 | 04/11/2026 | Manual mais rápido; ao ligar, espera o modo do Blynk |
 | 04/11/2026 | Proteção contra batida: memória do sensor da frente e checagem lateral |
 | 04/11/2026 | Contagem de desvios para a esquerda e para a direita (Blynk V10/V11, ThingSpeak Field 7/8) |
+| 08/11/2026 | Contadores de desvio salvos na flash (sobrevivem ao desligar); código limpo, sem comentários |
 
 ## Backup do firmware
 
